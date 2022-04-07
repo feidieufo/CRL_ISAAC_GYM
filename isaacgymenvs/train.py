@@ -50,6 +50,7 @@ from isaacgymenvs.learning import amp_continuous
 from isaacgymenvs.learning import amp_players
 from isaacgymenvs.learning import amp_models
 from isaacgymenvs.learning import amp_network_builder
+from isaacgymenvs.learning import ppolag_continuous
 
 
 ## OmegaConf & Hydra Config
@@ -103,8 +104,9 @@ def launch_rlg_hydra(cfg: DictConfig):
         runner = Runner(algo_observer)
         runner.algo_factory.register_builder('amp_continuous', lambda **kwargs : amp_continuous.AMPAgent(**kwargs))
         runner.player_factory.register_builder('amp_continuous', lambda **kwargs : amp_players.AMPPlayerContinuous(**kwargs))
-        runner.model_builder.model_factory.register_builder('continuous_amp', lambda network, **kwargs : amp_models.ModelAMPContinuous(network))  
-        runner.model_builder.network_factory.register_builder('amp', lambda **kwargs : amp_network_builder.AMPBuilder())
+        runner.algo_factory.register_builder('ppolag', lambda **kwargs : ppolag_continuous.PPOLagAgent(**kwargs))
+        # runner.model_builder.model_factory.register_builder('continuous_amp', lambda network, **kwargs : amp_models.ModelAMPContinuous(network))  
+        # runner.model_builder.network_factory.register_builder('amp', lambda **kwargs : amp_network_builder.AMPBuilder())
 
         return runner
 
