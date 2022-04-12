@@ -83,6 +83,7 @@ class SACAgent(BaseAlgorithm):
         self.sac_device)
         self.target_entropy_coef = config.get("target_entropy_coef", 0.5)
         self.target_entropy = self.target_entropy_coef * -self.env_info['action_space'].shape[0]
+        # self.target_entropy = np.log(self.env_info['action_space'].shape[0])
         print("Target entropy", self.target_entropy)
         self.step = 0
         self.algo_observer = config['features']['observer']

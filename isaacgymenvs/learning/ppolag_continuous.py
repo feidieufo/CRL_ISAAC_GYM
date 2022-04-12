@@ -1136,7 +1136,7 @@ class PPOLagAgent(ContinuousPPOLagBase):
         self.last_lr = float(self.last_lr)
         self.bound_loss_type = self.config.get('bound_loss_type', 'bound') # 'regularisation' or 'bound'
         self.optimizer = optim.Adam(self.model.parameters(), float(self.last_lr), eps=1e-08, weight_decay=self.weight_decay)
-        self.optimizer_penalty = optim.Adam([self.penalty_param], float(self.last_lr), eps=1e-08, weight_decay=self.weight_decay)
+        self.optimizer_penalty = optim.Adam([self.penalty_param], float(params["config"]["plr"]), eps=1e-08, weight_decay=self.weight_decay)
         
         if self.has_central_value:
             cv_config = {

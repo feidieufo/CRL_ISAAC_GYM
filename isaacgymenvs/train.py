@@ -51,7 +51,7 @@ from isaacgymenvs.learning import amp_players
 from isaacgymenvs.learning import amp_models
 from isaacgymenvs.learning import amp_network_builder
 from isaacgymenvs.learning import ppolag_continuous
-
+import wandb
 
 ## OmegaConf & Hydra Config
 
@@ -124,10 +124,21 @@ def launch_rlg_hydra(cfg: DictConfig):
     with open(os.path.join(experiment_dir, 'config.yaml'), 'w') as f:
         f.write(OmegaConf.to_yaml(cfg))
 
+    wandb.init(
+        # config=dict(learning_rate=0.1),
+        sync_tensorboard=True,  # automatically upload SB3's tensorboard metrics to W&B
+        project=cfg.project,
+        name=cfg.experiment,
+    )    
+    wandb_config = wandb.config
+    print("wandb_config:", wandb_config)
+    cfg.train.params.config.update(wandb_config)
+    print("cfg_train_config:", cfg.train.params.config)
     runner.run({
         'train': not cfg.test,
         'play': cfg.test,
     })
+    wandb.finish()
 
 if __name__ == "__main__":
     launch_rlg_hydra()
