@@ -2,13 +2,13 @@ params:
   seed: ${...seed}
 
   algo:
-    name: sac
+    name: saclag
 
   model:
-    name: soft_actor_critic
+    name: continuous_saclag
 
   network:
-    name: soft_actor_critic
+    name: sac_actor_critic_cost
     separate: True
 
     space:
@@ -52,7 +52,7 @@ params:
     actor_lr: 0.0003
     critic_lr: 0.0003
     critic_tau: 0.005
-    batch_size: 4096
+    batch_size: 2048
     learnable_temperature: True
     num_seed_steps: 16 # total steps: num_actors * num_steps_per_episode * num_seed_steps
     replay_buffer_size: 1000000

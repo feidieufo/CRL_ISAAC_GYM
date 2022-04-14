@@ -1052,11 +1052,12 @@ class ContinuousPPOLagBase(PPOLagBase):
                     mean_lengths = self.game_lengths.get_mean()
                     self.mean_rewards = mean_rewards[0]
 
-                    penalty = nn.Softplus()(self.penalty_param)
-                    self.optimizer_penalty.zero_grad()
-                    penalty_loss = -penalty*torch.from_numpy(mean_costs-self.safety_bound).to(self.ppo_device)
-                    penalty_loss.backward()
-                    self.optimizer_penalty.step()
+                    for mini_ep in range(0, self.mini_epochs_num):
+                        penalty = nn.Softplus()(self.penalty_param)
+                        self.optimizer_penalty.zero_grad()
+                        penalty_loss = -penalty*torch.from_numpy(mean_costs-self.safety_bound).to(self.ppo_device)
+                        penalty_loss.backward()
+                        self.optimizer_penalty.step()
                     self.writer.add_scalar('losses/penalty_loss', penalty_loss, frame)
                     self.writer.add_scalar('losses/penalty', penalty, frame)
 

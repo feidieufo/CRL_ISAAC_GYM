@@ -223,3 +223,31 @@ class ModelPPOLagContinuousLogStd(BaseModel):
                 return self.costv_mean_std(cost, unnorm=True) if self.normalize_value else cost
 
 
+class ModelSACLagContinuous(BaseModel):
+
+    def __init__(self, network):
+        BaseModel.__init__(self, 'sac')
+        self.network_builder = network
+    
+    class Network(BaseModelNetwork):
+        def __init__(self, sac_network,**kwargs):
+            BaseModelNetwork.__init__(self,**kwargs)
+            self.sac_network = sac_network
+
+        def critic(self, obs, action):
+            return self.sac_network.critic(obs, action)
+
+        def critic_target(self, obs, action):
+            return self.sac_network.critic_target(obs, action)
+
+        def actor(self, obs):
+            return self.sac_network.actor(obs)
+        
+        def is_rnn(self):
+            return False
+
+        def forward(self, input_dict):
+            is_train = input_dict.pop('is_train', True)
+            mu, sigma = self.sac_network(input_dict)
+            dist = SquashedNormal(mu, sigma)
+            return dist

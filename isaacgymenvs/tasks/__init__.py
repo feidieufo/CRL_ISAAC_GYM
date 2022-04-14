@@ -41,6 +41,7 @@ from tasks.quadcopter import Quadcopter
 from tasks.shadow_hand import ShadowHand
 from tasks.trifinger import Trifinger
 from tasks.humanoid_cost import HumanoidCost
+from tasks.ant_cost import AntCost
 
 # Mappings from strings to environments
 isaacgym_task_map = {
@@ -58,4 +59,5 @@ isaacgym_task_map = {
     "ShadowHand": ShadowHand,
     "Trifinger": Trifinger,
     "HumanoidCost": HumanoidCost,
+    "AntCost": AntCost,
 }
