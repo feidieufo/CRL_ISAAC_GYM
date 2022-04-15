@@ -80,7 +80,9 @@ class SACLagAgent(BaseAlgorithm):
         self.log_alpha_optimizer = torch.optim.Adam([self.log_alpha],
                                                     lr=self.config["alpha_lr"],
                                                     betas=self.config.get("alphas_betas", [0.9, 0.999]))
-
+        self.log_penalty_optimizer = torch.optim.Adam([self.log_penalty],
+                                                    lr=self.config["p_lr"],
+                                                    betas=self.config.get("alphas_betas", [0.9, 0.999]))
         self.replay_buffer = CostVectorizedReplayBuffer(self.env_info['observation_space'].shape, 
         self.env_info['action_space'].shape, 
         self.replay_buffer_size, 
@@ -91,6 +93,7 @@ class SACLagAgent(BaseAlgorithm):
         print("Target entropy", self.target_entropy)
         self.step = 0
         self.algo_observer = config['features']['observer']
+        self.safety_bound = self.config.get('safety_bound', -1)
 
 
         # TODO: Is there a better way to get the maximum number of episodes?
@@ -200,6 +203,10 @@ class SACLagAgent(BaseAlgorithm):
         return self.log_alpha.exp()
 
     @property
+    def penalty(self):
+        return self.log_penalty.exp()
+
+    @property
     def device(self):
         return self.sac_device
     
@@ -210,7 +217,7 @@ class SACLagAgent(BaseAlgorithm):
         state['actor_optimizer'] = self.actor_optimizer.state_dict()
         state['critic_optimizer'] = self.critic_optimizer.state_dict()
         state['log_alpha_optimizer'] = self.log_alpha_optimizer.state_dict()        
-
+        state['log_penalty_optimizer'] = self.log_penalty_optimizer.state_dict()      
         return state
 
     def get_weights(self):
@@ -238,6 +245,7 @@ class SACLagAgent(BaseAlgorithm):
         self.actor_optimizer.load_state_dict(weights['actor_optimizer'])
         self.critic_optimizer.load_state_dict(weights['critic_optimizer'])
         self.log_alpha_optimizer.load_state_dict(weights['log_alpha_optimizer'])
+        self.log_penalty_optimizer.load_state_dict(weights['log_penalty_optimizer'])
 
     def restore(self, fn):
         checkpoint = torch_ext.load_checkpoint(fn)
@@ -289,7 +297,7 @@ class SACLagAgent(BaseAlgorithm):
         actor_Q1, actor_Q2, actor_C = self.model.critic(obs, action)
         actor_Q = torch.min(actor_Q1, actor_Q2)
         
-        actor_loss = (torch.max(self.alpha.detach(), self.min_alpha) * log_prob - actor_Q)
+        actor_loss = (torch.max(self.alpha.detach(), self.min_alpha) * log_prob - actor_Q + self.penalty.detach()*actor_C)
         actor_loss = actor_loss.mean()
 
         self.actor_optimizer.zero_grad(set_to_none=True)
@@ -531,6 +539,14 @@ class SACLagAgent(BaseAlgorithm):
                 mean_rewards = self.game_rewards.get_mean()
                 mean_costs = self.game_costs.get_mean()
                 mean_lengths = self.game_lengths.get_mean()
+
+                if self.epoch_num >= self.num_seed_steps:
+                    penalty_loss = -self.penalty * (mean_costs-self.safety_bound)
+                    self.log_penalty_optimizer.zero_grad(set_to_none=True)
+                    penalty_loss.backward()
+                    self.log_penalty_optimizer.step()
+                    self.writer.add_scalar('losses/penalty_loss', penalty_loss.item(), frame)
+                    self.writer.add_scalar('info/penalty', self.penalty.item(), frame)
 
                 self.writer.add_scalar('rewards/step', mean_rewards, frame)
                 # self.writer.add_scalar('rewards/iter', mean_rewards, epoch_num)

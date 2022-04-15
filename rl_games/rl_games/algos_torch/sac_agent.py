@@ -137,6 +137,7 @@ class SACAgent(BaseAlgorithm):
 
         self.games_to_track = self.config.get('games_to_track', 100)
         self.game_rewards = torch_ext.AverageMeter(1, self.games_to_track).to(self.sac_device)
+        self.game_costs = torch_ext.AverageMeter(1, self.games_to_track).to(self.sac_device)
         self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.sac_device)
         self.obs = None
 
@@ -179,6 +180,7 @@ class SACAgent(BaseAlgorithm):
         batch_size = self.num_agents * self.num_actors
 
         self.current_rewards = torch.zeros(batch_size, dtype=torch.float32, device=self.sac_device)
+        self.current_costs = torch.zeros(batch_size, dtype=torch.float32, device=self.sac_device)
         self.current_lengths = torch.zeros(batch_size, dtype=torch.long, device=self.sac_device)
 
         self.dones = torch.zeros((batch_size,), dtype=torch.uint8, device=self.sac_device)
@@ -366,6 +368,7 @@ class SACAgent(BaseAlgorithm):
 
     def clear_stats(self):
         self.game_rewards.clear()
+        self.game_costs.clear()
         self.game_lengths.clear()
         self.mean_rewards = self.last_mean_rewards = -100500
         self.algo_observer.after_clear_stats()
@@ -398,6 +401,7 @@ class SACAgent(BaseAlgorithm):
             step_end = time.time()
 
             self.current_rewards += rewards
+            self.current_costs += infos["cost"]
             self.current_lengths += 1
 
             total_time += step_end - step_start
@@ -407,6 +411,7 @@ class SACAgent(BaseAlgorithm):
             all_done_indices = dones.nonzero(as_tuple=False)
             done_indices = all_done_indices[::self.num_agents]
             self.game_rewards.update(self.current_rewards[done_indices])
+            self.game_costs.update(self.current_costs[done_indices])            
             self.game_lengths.update(self.current_lengths[done_indices])
 
             not_dones = 1.0 - dones.float()
@@ -417,6 +422,7 @@ class SACAgent(BaseAlgorithm):
             dones = dones * no_timeouts
 
             self.current_rewards = self.current_rewards * not_dones
+            self.current_costs = self.current_costs * not_dones
             self.current_lengths = self.current_lengths * not_dones
 
             if isinstance(obs, dict):
@@ -507,11 +513,14 @@ class SACAgent(BaseAlgorithm):
 
             if self.game_rewards.current_size > 0:
                 mean_rewards = self.game_rewards.get_mean()
+                mean_costs = self.game_costs.get_mean()
                 mean_lengths = self.game_lengths.get_mean()
 
                 self.writer.add_scalar('rewards/step', mean_rewards, frame)
                 # self.writer.add_scalar('rewards/iter', mean_rewards, epoch_num)
                 self.writer.add_scalar('rewards/time', mean_rewards, total_time)
+                self.writer.add_scalar('costs/step', mean_costs, frame)
+                self.writer.add_scalar('costs/time', mean_costs, total_time)
                 self.writer.add_scalar('episode_lengths/step', mean_lengths, frame)
                 # self.writer.add_scalar('episode_lengths/iter', mean_lengths, epoch_num)
                 self.writer.add_scalar('episode_lengths/time', mean_lengths, total_time)
