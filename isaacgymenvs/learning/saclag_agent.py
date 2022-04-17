@@ -95,6 +95,14 @@ class SACLagAgent(BaseAlgorithm):
         self.algo_observer = config['features']['observer']
         self.safety_bound = self.config.get('safety_bound', -1)
 
+        self.k_p = self.config.get('pid_kp', 0.)
+        self.k_i = self.config.get('pid_ki', 0.)
+        self.k_d = self.config.get('pid_kd', 0.)
+        self.p_error = 0
+        self.i_error = 0
+        self.d_error = 0
+        self.is_pid = self.config.get('is_pid', False)
+
 
         # TODO: Is there a better way to get the maximum number of episodes?
         self.max_episodes = torch.ones(self.num_actors, device=self.sac_device)*self.num_steps_per_episode
@@ -329,6 +337,21 @@ class SACLagAgent(BaseAlgorithm):
         
         return penalty_loss
 
+    def update_penalty_pid(self):
+        penalty_loss = torch.tensor(0.).float().to(self.sac_device)
+        if self.game_rewards.current_size > 0:
+            mean_costs = self.game_costs.get_mean()
+
+            current_error = mean_costs-self.safety_bound
+            self.i_error = self.i_error + current_error
+            self.d_error = current_error - self.p_error
+            self.p_error = current_error  
+            current_update = self.k_p * self.p_error + self.k_i * self.i_error + self.k_d * self.d_error
+            current_update = np.maximum(current_update, -18.0)
+            self.log_penalty.data.copy_(torch.tensor(current_update).float().to(self.sac_device))
+        
+        return penalty_loss
+
     def soft_update_params(self, net, target_net, tau):
         for param, target_param in zip(net.parameters(), target_net.parameters()):
             target_param.data.copy_(tau * param.data +
@@ -347,7 +370,11 @@ class SACLagAgent(BaseAlgorithm):
 
         actor_loss_info = actor_loss, entropy, alpha, alpha_loss
 
-        penalty_loss = self.update_penalty()
+        if not self.is_pid:
+            penalty_loss = self.update_penalty()
+        else:
+            penalty_loss = self.update_penalty_pid()
+
         self.soft_update_params(self.model.sac_network.critic, self.model.sac_network.critic_target,
                                      self.critic_tau)
         return actor_loss_info, critic1_loss, critic2_loss, criticC_loss, penalty_loss

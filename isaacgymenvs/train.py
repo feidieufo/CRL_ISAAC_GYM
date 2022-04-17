@@ -139,6 +139,7 @@ def launch_rlg_hydra(cfg: DictConfig):
     runner.run({
         'train': not cfg.test,
         'play': cfg.test,
+        'checkpoint' : cfg.checkpoint
     })
     wandb.finish()
 
