@@ -318,6 +318,17 @@ class SACLagAgent(BaseAlgorithm):
 
         return actor_loss.detach(), entropy.detach(), self.alpha.detach(), alpha_loss # TODO: maybe not self.alpha
 
+    def update_penalty(self):
+        penalty_loss = 0
+        if self.game_rewards.current_size > 0:
+            mean_costs = self.game_costs.get_mean()
+            penalty_loss = -self.penalty * (mean_costs-self.safety_bound)
+            self.log_penalty_optimizer.zero_grad(set_to_none=True)
+            penalty_loss.backward()
+            self.log_penalty_optimizer.step()
+        
+        return penalty_loss
+
     def soft_update_params(self, net, target_net, tau):
         for param, target_param in zip(net.parameters(), target_net.parameters()):
             target_param.data.copy_(tau * param.data +
@@ -335,9 +346,11 @@ class SACLagAgent(BaseAlgorithm):
         actor_loss, entropy, alpha, alpha_loss = self.update_actor_and_alpha(obs, step)
 
         actor_loss_info = actor_loss, entropy, alpha, alpha_loss
+
+        penalty_loss = self.update_penalty()
         self.soft_update_params(self.model.sac_network.critic, self.model.sac_network.critic_target,
                                      self.critic_tau)
-        return actor_loss_info, critic1_loss, critic2_loss, criticC_loss
+        return actor_loss_info, critic1_loss, critic2_loss, criticC_loss, penalty_loss
 
     def preproc_obs(self, obs):
         if isinstance(obs, dict):
@@ -406,6 +419,7 @@ class SACLagAgent(BaseAlgorithm):
         critic1_losses = []
         critic2_losses = []
         criticC_losses = []
+        penalty_losses = []
 
         obs = self.obs
         for _ in range(self.num_steps_per_episode):
@@ -461,7 +475,7 @@ class SACLagAgent(BaseAlgorithm):
             if not random_exploration:
                 self.set_train() 
                 update_time_start = time.time()
-                actor_loss_info, critic1_loss, critic2_loss, criticC_loss = self.update(self.epoch_num)
+                actor_loss_info, critic1_loss, critic2_loss, criticC_loss, penalty_loss = self.update(self.epoch_num)
                 update_time_end = time.time()
                 update_time = update_time_end - update_time_start
 
@@ -469,6 +483,7 @@ class SACLagAgent(BaseAlgorithm):
                 critic1_losses.append(critic1_loss)
                 critic2_losses.append(critic2_loss)
                 criticC_losses.append(criticC_loss)
+                penalty_losses.append(penalty_loss)
             else:
                 update_time = 0
 
@@ -478,15 +493,15 @@ class SACLagAgent(BaseAlgorithm):
         total_time = total_time_end - total_time_start
         play_time = total_time - total_update_time
 
-        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses
+        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses, penalty_losses
 
     def train_epoch(self):
         if self.epoch_num < self.num_seed_steps:
-            step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses = self.play_steps(random_exploration=True)
+            step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses, penalty_losses = self.play_steps(random_exploration=True)
         else:
-            step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses = self.play_steps(random_exploration=False)
+            step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses, penalty_losses = self.play_steps(random_exploration=False)
 
-        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses
+        return step_time, play_time, total_update_time, total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses, penalty_losses
 
     def train(self):
         self.init_tensors()
@@ -499,7 +514,7 @@ class SACLagAgent(BaseAlgorithm):
 
         while True:
             self.epoch_num += 1
-            step_time, play_time, update_time, epoch_total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses = self.train_epoch()
+            step_time, play_time, update_time, epoch_total_time, actor_losses, entropies, alphas, alpha_losses, critic1_losses, critic2_losses, criticC_losses, penalty_losses = self.train_epoch()
 
             total_time += epoch_total_time
 
@@ -541,11 +556,11 @@ class SACLagAgent(BaseAlgorithm):
                 mean_lengths = self.game_lengths.get_mean()
 
                 if self.epoch_num >= self.num_seed_steps:
-                    penalty_loss = -self.penalty * (mean_costs-self.safety_bound)
-                    self.log_penalty_optimizer.zero_grad(set_to_none=True)
-                    penalty_loss.backward()
-                    self.log_penalty_optimizer.step()
-                    self.writer.add_scalar('losses/penalty_loss', penalty_loss.item(), frame)
+                #     penalty_loss = -self.penalty * (mean_costs-self.safety_bound)
+                #     self.log_penalty_optimizer.zero_grad(set_to_none=True)
+                #     penalty_loss.backward()
+                #     self.log_penalty_optimizer.step()
+                    self.writer.add_scalar('losses/penalty_loss', torch_ext.mean_list(penalty_losses).item(), frame)
                     self.writer.add_scalar('info/penalty', self.penalty.item(), frame)
 
                 self.writer.add_scalar('rewards/step', mean_rewards, frame)
