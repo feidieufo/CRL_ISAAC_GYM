@@ -57,8 +57,8 @@ params:
     learnable_temperature: True
     num_seed_steps: 2 # total steps: num_actors * num_steps_per_episode * num_seed_steps
     replay_buffer_size: 1000000
-    safety_bound: 10
-    is_pid: True
-    pid_kp: 0.1
-    pid_ki: 0.1
+    safety_bound: 2000
+    is_pid: False
+    pid_kp: 0.0001
+    pid_ki: 0.0001
     pid_kd: 0.

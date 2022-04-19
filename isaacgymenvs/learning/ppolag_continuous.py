@@ -164,6 +164,13 @@ class PPOLagBase(BaseAlgorithm):
         self.has_central_value = self.central_value_config is not None
         self.truncate_grads = self.config.get('truncate_grads', False)
         self.safety_bound = self.config.get('safety_bound', -1)
+        self.k_p = self.config.get('pid_kp', 0.)
+        self.k_i = self.config.get('pid_ki', 0.)
+        self.k_d = self.config.get('pid_kd', 0.)
+        self.p_error = 0
+        self.i_error = 0
+        self.d_error = 0
+        self.is_pid = self.config.get('is_pid', False)
 
         if self.has_central_value:
             self.state_space = self.env_info.get('state_space', None)
@@ -314,6 +321,10 @@ class PPOLagBase(BaseAlgorithm):
         self.has_soft_aug = self.soft_aug is not None
         # soft augmentation not yet supported
         assert not self.has_soft_aug
+
+    @property
+    def penalty(self):
+        return self.penalty_param.exp()
 
     def load_networks(self, params):
         builder = model_builder.ModelBuilder()
@@ -878,6 +889,7 @@ class ContinuousPPOLagBase(PPOLagBase):
         a_losses = []
         c_losses = []
         cost_losses = []
+        penalty_losses = []
         b_losses = []
         entropies = []
         kls = []
@@ -886,10 +898,11 @@ class ContinuousPPOLagBase(PPOLagBase):
         for mini_ep in range(0, self.mini_epochs_num):
             ep_kls = []
             for i in range(len(self.dataset)):
-                a_loss, c_loss, cost_loss, entropy, kl, last_lr, lr_mul, cmu, csigma, b_loss = self.train_actor_critic(self.dataset[i])
+                a_loss, c_loss, cost_loss, penalty_loss, entropy, kl, last_lr, lr_mul, cmu, csigma, b_loss = self.train_actor_critic(self.dataset[i])
                 a_losses.append(a_loss)
                 c_losses.append(c_loss)
                 cost_losses.append(cost_loss)
+                penalty_losses.append(penalty_loss)
                 ep_kls.append(kl)
                 entropies.append(entropy)
                 if self.bounds_loss_coef is not None:
@@ -928,7 +941,7 @@ class ContinuousPPOLagBase(PPOLagBase):
         update_time = update_time_end - update_time_start
         total_time = update_time_end - play_time_start
 
-        return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul
+        return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, cost_losses, b_losses, penalty_losses, entropies, kls, last_lr, lr_mul
 
     def prepare_dataset(self, batch_dict):
         obses = batch_dict['obses']
@@ -1017,7 +1030,7 @@ class ContinuousPPOLagBase(PPOLagBase):
 
         while True:
             epoch_num = self.update_epoch()
-            step_time, play_time, update_time, sum_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul = self.train_epoch()
+            step_time, play_time, update_time, sum_time, a_losses, c_losses, cost_losses, b_losses, penalty_losses, entropies, kls, last_lr, lr_mul = self.train_epoch()
             total_time += sum_time
             frame = self.frame // self.num_agents
             if self.multi_gpu:
@@ -1052,14 +1065,8 @@ class ContinuousPPOLagBase(PPOLagBase):
                     mean_lengths = self.game_lengths.get_mean()
                     self.mean_rewards = mean_rewards[0]
 
-                    for mini_ep in range(0, self.mini_epochs_num):
-                        penalty = nn.Softplus()(self.penalty_param)
-                        self.optimizer_penalty.zero_grad()
-                        penalty_loss = -penalty*torch.from_numpy(mean_costs-self.safety_bound).to(self.ppo_device)
-                        penalty_loss.backward()
-                        self.optimizer_penalty.step()
-                    self.writer.add_scalar('losses/penalty_loss', penalty_loss, frame)
-                    self.writer.add_scalar('losses/penalty', penalty, frame)
+                    self.writer.add_scalar('losses/penalty_loss', torch_ext.mean_list(penalty_losses).item(), frame)
+                    self.writer.add_scalar('info/penalty', self.penalty, frame)
 
                     for i in range(self.value_size):
                         rewards_name = 'rewards' if i == 0 else 'rewards{0}'.format(i)
@@ -1224,7 +1231,24 @@ class PPOLagAgent(ContinuousPPOLagBase):
             mu = res_dict['mus']
             sigma = res_dict['sigmas']
 
-            penalty = nn.Softplus()(self.penalty_param)
+            penalty_loss = torch.tensor(0.).float().to(self.ppo_device)
+            if self.game_rewards.current_size > 0:
+                mean_costs = self.game_costs.get_mean()  
+                if not self.is_pid:  
+                    # for i in range(10):        
+                    self.optimizer_penalty.zero_grad()
+                    penalty_loss = -self.penalty*torch.from_numpy(mean_costs-self.safety_bound).to(self.ppo_device)
+                    penalty_loss.backward()
+                    self.optimizer_penalty.step()
+                else:
+                    current_error = mean_costs[0]-self.safety_bound
+                    self.i_error = self.i_error + current_error
+                    self.d_error = current_error - self.p_error
+                    self.p_error = current_error  
+                    current_update = self.k_p * self.p_error + self.k_i * self.i_error + self.k_d * self.d_error
+                    current_update = np.maximum(current_update, -18.0)
+                    self.penalty_param.data.copy_(torch.tensor(current_update).float().to(self.ppo_device))
+
             if self.ewma_ppo:
                 ewma_dict = self.ewma_model(batch_dict)
                 proxy_neglogp = ewma_dict['prev_neglogp']
@@ -1233,7 +1257,7 @@ class PPOLagAgent(ContinuousPPOLagBase):
                 old_mu_batch = ewma_dict['mus']
                 old_sigma_batch = ewma_dict['sigmas']
             else:
-                a_loss = self.actor_loss_func(old_action_log_probs_batch, action_log_probs, advantage, self.ppo, curr_e_clip, cost_advantage, penalty)
+                a_loss = self.actor_loss_func(old_action_log_probs_batch, action_log_probs, advantage, self.ppo, curr_e_clip, cost_advantage, self.penalty.detach())
 
             if self.has_value_loss:
                 c_loss = critic_loss(value_preds_batch, values, curr_e_clip, return_batch, self.clip_value)
@@ -1295,7 +1319,7 @@ class PPOLagAgent(ContinuousPPOLagBase):
             'masks' : rnn_masks
         }, curr_e_clip, 0)      
 
-        self.train_result = (a_loss, c_loss, cost_loss, entropy, \
+        self.train_result = (a_loss, c_loss, cost_loss, penalty_loss, entropy, \
             kl_dist, self.last_lr, lr_mul, \
             mu.detach(), sigma.detach(), b_loss)
 

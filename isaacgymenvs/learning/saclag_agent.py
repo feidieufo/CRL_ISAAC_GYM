@@ -212,7 +212,7 @@ class SACLagAgent(BaseAlgorithm):
 
     @property
     def penalty(self):
-        return self.log_penalty.exp()
+        return F.softplus(self.log_penalty)
 
     @property
     def device(self):
@@ -333,6 +333,7 @@ class SACLagAgent(BaseAlgorithm):
             penalty_loss = -self.penalty * (mean_costs-self.safety_bound)
             self.log_penalty_optimizer.zero_grad(set_to_none=True)
             penalty_loss.backward()
+            nn.utils.clip_grad_norm_([self.log_penalty], max_norm=20, norm_type=2)
             self.log_penalty_optimizer.step()
         
         return penalty_loss
