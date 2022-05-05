@@ -2,7 +2,7 @@ params:
   seed: ${...seed}
 
   algo:
-    name: ppolag
+    name: focops
 
   model:
     name: continuous_ppolag
@@ -51,7 +51,7 @@ params:
     gamma: 0.99
     tau: 0.95
     learning_rate: 3e-4
-    plr: 3e-2
+    plr: 3e-4
     lr_schedule: adaptive
     schedule_type: legacy
     kl_threshold: 0.008
@@ -71,7 +71,8 @@ params:
     seq_len: 4
     bounds_loss_coef: 0.0001
     safety_bound: 2000
-    is_pid: True
-    pid_kp: 0.1
-    pid_ki: 0.01
-    pid_kd: 0.
+    nu_lr: 0.01
+    nu_max: 2.0
+    eta: 0.02
+    delta: 0.02
+    lam: 3.

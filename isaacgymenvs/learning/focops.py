@@ -36,50 +36,6 @@ def critic_loss(value_preds_batch, values, curr_e_clip, return_batch, clip_value
         c_loss = (return_batch - values)**2
     return c_loss
 
-def smooth_clamp(x, mi, mx):
-    return 1/(1 + torch.exp((-(x-mi)/(mx-mi)+0.5)*4)) * (mx-mi) + mi
-
-
-def smoothed_actor_loss(old_action_neglog_probs_batch, action_neglog_probs, advantage, is_ppo, curr_e_clip, cost_advantage, penalty):
-    if is_ppo:
-        ratio = torch.exp(old_action_neglog_probs_batch - action_neglog_probs)
-        surr1 = advantage * ratio
-        surr2 = advantage * smooth_clamp(ratio, 1.0 - curr_e_clip,
-                                1.0 + curr_e_clip)
-        a_loss = torch.max(-surr1, -surr2)
-    else:
-        a_loss = (action_neglog_probs * advantage)
-    
-    surr_cost = ratio * cost_advantage
-    a_loss += penalty*surr_cost
-    a_loss /= (1 + penalty)
-    return a_loss
-
-
-def actor_loss(old_action_neglog_probs_batch, action_neglog_probs, advantage, is_ppo, curr_e_clip, cost_advantage, penalty):
-    if is_ppo:
-        ratio = torch.exp(old_action_neglog_probs_batch - action_neglog_probs)
-        surr1 = advantage * ratio
-        surr2 = advantage * torch.clamp(ratio, 1.0 - curr_e_clip, 1.0 + curr_e_clip)
-        a_loss = torch.max(-surr1, -surr2)
-    else:
-        a_loss = (action_neglog_probs * advantage)
-
-    surr_cost = ratio * cost_advantage
-    a_loss += penalty*surr_cost
-    a_loss /= (1 + penalty)
-    return a_loss
-
-def decoupled_actor_loss(behavior_action_neglog_probs, action_neglog_probs, proxy_neglog_probs, advantage, curr_e_clip):
-    logratio = proxy_neglog_probs - action_neglog_probs
-    #neglogp_adj = -torch.max(-behavior_action_neglog_probs, -action_neglog_probs.detach() - math.log(100))
-    pg_losses1 = -advantage * torch.exp(behavior_action_neglog_probs - action_neglog_probs)
-    clipped_logratio = torch.clamp(logratio, math.log(1.0 - curr_e_clip), math.log(1.0 + curr_e_clip))
-    pg_losses2 = -advantage * torch.exp(clipped_logratio - proxy_neglog_probs + behavior_action_neglog_probs)
-    pg_losses = torch.max(pg_losses1,pg_losses2)
-    
-    return pg_losses
-
 def swap_and_flatten01(arr):
     """
     swap and then flatten axes 0 and 1
@@ -96,7 +52,7 @@ def rescale_actions(low, high, action):
     return scaled_action
 
 
-class PPOLagBase(BaseAlgorithm):
+class FOCOPSBase(BaseAlgorithm):
     def __init__(self, base_name, params):
         self.config = config = params['config']
         pbt_str = ''
@@ -118,16 +74,9 @@ class PPOLagBase(BaseAlgorithm):
         self.algo_observer = config['features']['observer']
         self.algo_observer.before_init(base_name, config, self.experiment_name)
         self.load_networks(params)
-        self.multi_gpu = config.get('multi_gpu', False)
         self.rank = 0
         self.rank_size = 1
         self.curr_frames = 0
-        if self.multi_gpu:
-            from rl_games.distributed.hvd_wrapper import HorovodWrapper
-            self.hvd = HorovodWrapper()
-            self.config = self.hvd.update_algo_config(config)
-            self.rank = self.hvd.rank
-            self.rank_size = self.hvd.rank_size
 
         self.use_diagnostics = config.get('use_diagnostics', False)
 
@@ -149,7 +98,8 @@ class PPOLagBase(BaseAlgorithm):
             self.vec_env = vecenv.create_vec_env(self.env_name, self.num_actors, **self.env_config)
             self.env_info = self.vec_env.get_env_info()
 
-        self.ppo_device = config.get('device', 'cuda:0')
+        self.device = config.get('device', 'cuda:0')
+        self.ppo_device = self.device
         print('Env info:')
         print(self.env_info)
         self.value_size = self.env_info.get('value_size',1)
@@ -158,28 +108,8 @@ class PPOLagBase(BaseAlgorithm):
         self.use_action_masks = config.get('use_action_masks', False)
         self.is_train = config.get('is_train', True)
 
-        self.ewma_ppo = config.get('ewma_ppo', False)
-        self.ewma_model = None
-        self.central_value_config = self.config.get('central_value_config', None)
-        self.has_central_value = self.central_value_config is not None
         self.truncate_grads = self.config.get('truncate_grads', False)
         self.safety_bound = self.config.get('safety_bound', -1)
-        self.k_p = self.config.get('pid_kp', 0.)
-        self.k_i = self.config.get('pid_ki', 0.)
-        self.k_d = self.config.get('pid_kd', 0.)
-        self.p_error = 0
-        self.i_error = 0
-        self.d_error = 0
-        self.is_pid = self.config.get('is_pid', False)
-
-        if self.has_central_value:
-            self.state_space = self.env_info.get('state_space', None)
-            if isinstance(self.state_space,gym.spaces.Dict):
-                self.state_shape = {}
-                for k,v in self.state_space.spaces.items():
-                    self.state_shape[k] = v.shape
-            else:
-                self.state_shape = self.state_space.shape
 
         self.self_play_config = self.config.get('self_play_config', None)
         self.has_self_play_config = self.self_play_config is not None
@@ -191,7 +121,6 @@ class PPOLagBase(BaseAlgorithm):
         self.rnn_states = None
         self.name = base_name
 
-        self.ppo = config['ppo']
         self.max_epochs = self.config.get('max_epochs', 1e6)
 
         self.is_adaptive_lr = config['lr_schedule'] == 'adaptive'
@@ -209,9 +138,7 @@ class PPOLagBase(BaseAlgorithm):
         else:
             self.scheduler = schedulers.IdentityScheduler()
 
-        self.e_clip = nn.Parameter(torch.tensor(config['e_clip'], requires_grad=True, dtype=torch.float32, device= self.ppo_device), requires_grad=True)
-        param_init = torch.tensor(np.log(max(np.exp(1.)-1, 1e-8)), requires_grad=True, dtype=torch.float32, device= self.ppo_device)
-        self.penalty_param = nn.Parameter(torch.tensor(param_init), requires_grad=True)
+        self.e_clip = nn.Parameter(torch.tensor(config['e_clip'], requires_grad=True, dtype=torch.float32, device= self.device), requires_grad=True)
         self.clip_value = config['clip_value']
         self.network = config['network']
         self.rewards_shaper = config['reward_shaper']
@@ -224,7 +151,6 @@ class PPOLagBase(BaseAlgorithm):
         self.normalize_input = self.config['normalize_input']
         self.normalize_value = self.config.get('normalize_value', False)
         self.truncate_grads = self.config.get('truncate_grads', False)
-        self.has_phasic_policy_gradients = False
 
         if isinstance(self.observation_space,gym.spaces.Dict):
             self.obs_shape = {}
@@ -239,11 +165,10 @@ class PPOLagBase(BaseAlgorithm):
         self.tau = self.config['tau']
 
         self.games_to_track = self.config.get('games_to_track', 100)
-        print(self.ppo_device)
-        self.game_rewards = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_costs = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_costs_cur = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.ppo_device)
+        print(self.device)
+        self.game_rewards = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.device)
+        self.game_costs = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.device)
+        self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.device)
         self.obs = None
         self.games_num = self.config['minibatch_size'] // self.seq_len # it is used only for current rnn implementation
         self.batch_size = self.horizon_length * self.num_actors * self.num_agents
@@ -257,6 +182,12 @@ class PPOLagBase(BaseAlgorithm):
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.mixed_precision)
 
         self.last_lr = self.config['learning_rate']
+        self.nu_lr = self.config['nu_lr']
+        self.nu_max = self.config['nu_max']
+        self.eta = self.config['eta']
+        self.lam = self.config['lam']
+        self.delta = self.config['delta']
+        self.nu = 0
         self.frame = 0
         self.update_time = 0
         self.mean_rewards = self.last_mean_rewards = -100500
@@ -294,16 +225,10 @@ class PPOLagBase(BaseAlgorithm):
 
         self.use_smooth_clamp = self.config.get('use_smooth_clamp', False)
 
-        if self.use_smooth_clamp:
-            self.actor_loss_func = smoothed_actor_loss
-        else:
-            self.actor_loss_func = actor_loss
-
-
 
         if self.normalize_advantage and self.normalize_rms_advantage:
             momentum = self.config.get('adv_rms_momentum',0.5 ) #'0.25'
-            self.advantage_mean_std = MovingMeanStd((1,), momentum=momentum).to(self.ppo_device)
+            self.advantage_mean_std = MovingMeanStd((1,), momentum=momentum).to(self.device)
 
         self.is_tensor_obses = False
 
@@ -323,10 +248,8 @@ class PPOLagBase(BaseAlgorithm):
         # soft augmentation not yet supported
         assert not self.has_soft_aug
 
-    @property
-    def penalty(self):
-        # return self.penalty_param.exp()
-        return self.penalty_param
+    def device(self):
+        return self.device
 
     def load_networks(self, params):
         builder = model_builder.ModelBuilder()
@@ -337,13 +260,6 @@ class PPOLagBase(BaseAlgorithm):
         builder.network_builder.network_factory.register_builder('actor_critic_cost',
                                             lambda **kwargs: ppolag_network_builder.PPOLagBuilder())
         self.config['network'] = builder.load(params)
-        has_central_value_net = self.config.get('central_value_config') is not  None
-        if has_central_value_net:
-            print('Adding Central Value Network')
-            if 'model' not in params['config']['central_value_config']:
-                params['config']['central_value_config']['model'] = {'name': 'central_value'}
-            network = builder.load(params['config']['central_value_config'])
-            self.config['central_value_config']['network'] = network
 
 
     def write_stats(self, total_time, epoch_num, step_time, play_time, update_time, a_losses, c_losses, cost_losses, entropies, kls, last_lr, lr_mul, frame, scaled_time, scaled_play_time, curr_frames):
@@ -380,16 +296,9 @@ class PPOLagBase(BaseAlgorithm):
 
 
     def update_lr(self, lr):
-        if self.multi_gpu:
-            lr_tensor = torch.tensor([lr])
-            self.hvd.broadcast_value(lr_tensor, 'learning_rate')
-            lr = lr_tensor.item()
 
         for param_group in self.optimizer.param_groups:
             param_group['lr'] = lr
-        
-        #if self.has_central_value:
-        #    self.central_value_net.update_lr(lr)
 
     def get_action_values(self, obs):
         processed_obs = self._preproc_obs(obs['obs'])
@@ -403,45 +312,22 @@ class PPOLagBase(BaseAlgorithm):
 
         with torch.no_grad():
             res_dict = self.model(input_dict)
-            if self.has_central_value:
-                states = obs['states']
-                input_dict = {
-                    'is_train': False,
-                    'states' : states,
-                }
-                value = self.get_central_value(input_dict)
-                res_dict['values'] = value
         return res_dict
 
     def get_values(self, obs):
         with torch.no_grad():
-            if self.has_central_value:
-                states = obs['states']
-                self.central_value_net.eval()
-                input_dict = {
-                    'is_train': False,
-                    'states' : states,
-                    'actions' : None,
-                    'is_done': self.dones,
-                }
-                value = self.get_central_value(input_dict)
-            else:
-                self.model.eval()
-                processed_obs = self._preproc_obs(obs['obs'])
-                input_dict = {
-                    'is_train': False,
-                    'prev_actions': None, 
-                    'obs' : processed_obs,
-                    'rnn_states' : self.rnn_states
-                }
-                result = self.model(input_dict)
-                value = result['values']
-                cost = result['costvs']
-            return value, cost
-
-    @property
-    def device(self):
-        return self.ppo_device
+            self.model.eval()
+            processed_obs = self._preproc_obs(obs['obs'])
+            input_dict = {
+                'is_train': False,
+                'prev_actions': None, 
+                'obs' : processed_obs,
+                'rnn_states' : self.rnn_states
+            }
+            result = self.model(input_dict)
+            value = result['values']
+            cost = result['costvs']
+        return value, cost
 
     def reset_envs(self):
         self.obs = self.env_reset()
@@ -451,26 +337,26 @@ class PPOLagBase(BaseAlgorithm):
         algo_info = {
             'num_actors' : self.num_actors,
             'horizon_length' : self.horizon_length,
-            'has_central_value' : self.has_central_value,
-            'use_action_masks' : self.use_action_masks
+            'use_action_masks' : self.use_action_masks,
+            'has_central_value': False,
         }
-        self.experience_buffer = ExperienceBuffer(self.env_info, algo_info, self.ppo_device, has_cost=True)
+        self.experience_buffer = ExperienceBuffer(self.env_info, algo_info, self.device, has_cost=True)
 
         val_shape = (self.horizon_length, batch_size, self.value_size)
         current_rewards_shape = (batch_size, self.value_size)
-        self.current_rewards = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
-        self.current_costs = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
-        self.current_lengths = torch.zeros(batch_size, dtype=torch.float32, device=self.ppo_device)
-        self.dones = torch.ones((batch_size,), dtype=torch.uint8, device=self.ppo_device)
+        self.current_rewards = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.device)
+        self.current_costs = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.device)
+        self.current_lengths = torch.zeros(batch_size, dtype=torch.float32, device=self.device)
+        self.dones = torch.ones((batch_size,), dtype=torch.uint8, device=self.device)
 
         if self.is_rnn:
             self.rnn_states = self.model.get_default_rnn_state()
-            self.rnn_states = [s.to(self.ppo_device) for s in self.rnn_states]
+            self.rnn_states = [s.to(self.device) for s in self.rnn_states]
 
             total_agents = self.num_agents * self.num_actors
             num_seqs = self.horizon_length // self.seq_len
             assert((self.horizon_length * total_agents // self.num_minibatches) % self.seq_len == 0)
-            self.mb_rnn_states = [torch.zeros((num_seqs, s.size()[0], total_agents, s.size()[2]), dtype = torch.float32, device=self.ppo_device) for s in self.rnn_states]
+            self.mb_rnn_states = [torch.zeros((num_seqs, s.size()[0], total_agents, s.size()[2]), dtype = torch.float32, device=self.device) for s in self.rnn_states]
 
     def init_rnn_from_model(self, model):
         self.is_rnn = self.model.is_rnn()
@@ -481,9 +367,9 @@ class PPOLagBase(BaseAlgorithm):
         elif isinstance(obs, np.ndarray):
             assert(self.observation_space.dtype != np.int8)
             if self.observation_space.dtype == np.uint8:
-                obs = torch.ByteTensor(obs).to(self.ppo_device)
+                obs = torch.ByteTensor(obs).to(self.device)
             else:
-                obs = torch.FloatTensor(obs).to(self.ppo_device)
+                obs = torch.FloatTensor(obs).to(self.device)
         return obs
 
     def obs_to_tensors(self, obs):
@@ -520,12 +406,12 @@ class PPOLagBase(BaseAlgorithm):
             if self.value_size == 1:
                 rewards = rewards.unsqueeze(1)
                 infos["cost"] = infos["cost"].unsqueeze(1)
-            return self.obs_to_tensors(obs), rewards.to(self.ppo_device), dones.to(self.ppo_device), infos
+            return self.obs_to_tensors(obs), rewards.to(self.device), dones.to(self.device), infos
         else:
             if self.value_size == 1:
                 rewards = np.expand_dims(rewards, axis=1)
                 infos["cost"] = np.expand_dims(infos["cost"], axis=1)
-            return self.obs_to_tensors(obs), torch.from_numpy(rewards).to(self.ppo_device).float(), torch.from_numpy(dones).to(self.ppo_device), infos
+            return self.obs_to_tensors(obs), torch.from_numpy(rewards).to(self.device).float(), torch.from_numpy(dones).to(self.device), infos
 
     def env_reset(self):
         obs = self.vec_env.reset()
@@ -569,7 +455,6 @@ class PPOLagBase(BaseAlgorithm):
         batch_size = self.num_agents * self.num_actors
         self.game_rewards.clear()
         self.game_costs.clear()
-        self.game_costs_cur.clear()
         self.game_lengths.clear()
         self.mean_rewards = self.last_mean_rewards = -100500
         self.algo_observer.after_clear_stats()
@@ -585,8 +470,6 @@ class PPOLagBase(BaseAlgorithm):
 
     def train_epoch(self):
         self.vec_env.set_train_info(self.frame, self)
-        if self.ewma_ppo:
-            self.ewma_model.reset()
 
     def train_actor_critic(self, obs_dict, opt_step=True):
         pass 
@@ -594,18 +477,10 @@ class PPOLagBase(BaseAlgorithm):
     def calc_gradients(self):
         pass
 
-    def get_central_value(self, obs_dict):
-        return self.central_value_net.get_value(obs_dict)
-
-    def train_central_value(self):
-        return self.central_value_net.train_net()
-
     def get_full_state_weights(self):
         state = self.get_weights()
         state['epoch'] = self.epoch_num
         state['optimizer'] = self.optimizer.state_dict()
-        if self.has_central_value:
-            state['assymetric_vf_nets'] = self.central_value_net.state_dict()
         state['frame'] = self.frame
 
         # This is actually the best reward ever achieved. last_mean_rewards is perhaps not the best variable name
@@ -621,8 +496,6 @@ class PPOLagBase(BaseAlgorithm):
     def set_full_state_weights(self, weights):
         self.set_weights(weights)
         self.epoch_num = weights['epoch']
-        if self.has_central_value:
-            self.central_value_net.load_state_dict(weights['assymetric_vf_nets'])
         self.optimizer.load_state_dict(weights['optimizer'])
         self.frame = weights.get('frame', 0)
         self.last_mean_rewards = weights.get('last_mean_rewards', -100500)
@@ -641,8 +514,6 @@ class PPOLagBase(BaseAlgorithm):
         state = {}
         if self.mixed_precision:
             state['scaler'] = self.scaler.state_dict()
-        if self.has_central_value:
-            state['central_val_stats'] = self.central_value_net.get_stats_weights(model_stats)
         if model_stats:
             if self.normalize_input:
                 state['running_mean_std'] = self.model.running_mean_std.state_dict()
@@ -684,7 +555,6 @@ class PPOLagBase(BaseAlgorithm):
 
         step_time = 0.0
 
-        self.game_costs_cur.clear()
         for n in range(self.horizon_length):
             if self.use_action_masks:
                 masks = self.vec_env.get_action_masks()
@@ -697,8 +567,6 @@ class PPOLagBase(BaseAlgorithm):
 
             for k in update_list:
                 self.experience_buffer.update_data(k, n, res_dict[k]) 
-            if self.has_central_value:
-                self.experience_buffer.update_data('states', n, self.obs['states'])
 
             step_time_start = time.time()
             self.obs, rewards, self.dones, infos = self.env_step(res_dict['actions'])
@@ -724,7 +592,6 @@ class PPOLagBase(BaseAlgorithm):
 
             self.game_rewards.update(self.current_rewards[env_done_indices])
             self.game_costs.update(self.current_costs[env_done_indices])
-            self.game_costs_cur.update(self.current_costs[env_done_indices])
             self.game_lengths.update(self.current_lengths[env_done_indices])
             self.algo_observer.process_infos(infos, env_done_indices)
 
@@ -760,14 +627,10 @@ class PPOLagBase(BaseAlgorithm):
         mb_rnn_states = self.mb_rnn_states
         step_time = 0.0
 
-        self.game_costs_cur.clear()
         for n in range(self.horizon_length):
             if n % self.seq_len == 0:
                 for s, mb_s in zip(self.rnn_states, mb_rnn_states):
                     mb_s[n // self.seq_len,:,:,:] = s
-
-            if self.has_central_value:
-                self.central_value_net.pre_step_rnn(n)
 
             if self.use_action_masks:
                 masks = self.vec_env.get_action_masks()
@@ -780,8 +643,6 @@ class PPOLagBase(BaseAlgorithm):
 
             for k in update_list:
                 self.experience_buffer.update_data(k, n, res_dict[k])
-            if self.has_central_value:
-                self.experience_buffer.update_data('states', n, self.obs['states'])
 
             step_time_start = time.time()
             self.obs, rewards, self.dones, infos = self.env_step(res_dict['actions'])
@@ -804,12 +665,9 @@ class PPOLagBase(BaseAlgorithm):
             if len(all_done_indices) > 0:
                 for s in self.rnn_states:
                     s[:, all_done_indices, :] = s[:, all_done_indices, :] * 0.0
-                if self.has_central_value:
-                    self.central_value_net.post_step_rnn(all_done_indices)
 
             self.game_rewards.update(self.current_rewards[env_done_indices])
             self.game_costs.update(self.current_costs[env_done_indices])
-            self.game_costs_cur.update(self.current_costs[env_done_indices])
             self.game_lengths.update(self.current_lengths[env_done_indices])
             self.algo_observer.process_infos(infos, env_done_indices)
 
@@ -840,9 +698,9 @@ class PPOLagBase(BaseAlgorithm):
         batch_dict['step_time'] = step_time
         return batch_dict
 
-class ContinuousPPOLagBase(PPOLagBase):
+class ContinuousFOCOPSBase(FOCOPSBase):
     def __init__(self, base_name, params):
-        PPOLagBase.__init__(self, base_name, params)
+        FOCOPSBase.__init__(self, base_name, params)
         self.is_discrete = False
         action_space = self.env_info['action_space']
         self.actions_num = action_space.shape[0]
@@ -851,8 +709,8 @@ class ContinuousPPOLagBase(PPOLagBase):
         self.clip_actions = self.config.get('clip_actions', True)
 
         # todo introduce device instead of cuda()
-        self.actions_low = torch.from_numpy(action_space.low.copy()).float().to(self.ppo_device)
-        self.actions_high = torch.from_numpy(action_space.high.copy()).float().to(self.ppo_device)
+        self.actions_low = torch.from_numpy(action_space.low.copy()).float().to(self.device)
+        self.actions_high = torch.from_numpy(action_space.high.copy()).float().to(self.device)
    
     def preprocess_actions(self, actions):
         if self.clip_actions:
@@ -867,7 +725,7 @@ class ContinuousPPOLagBase(PPOLagBase):
         return rescaled_actions
 
     def init_tensors(self):
-        PPOLagBase.init_tensors(self)
+        FOCOPSBase.init_tensors(self)
         self.update_list = ['actions', 'neglogpacs', 'values', 'mus', 'sigmas', 'costvs']
         self.tensor_list = self.update_list + ['obses', 'states', 'dones']
 
@@ -890,13 +748,10 @@ class ContinuousPPOLagBase(PPOLagBase):
         self.curr_frames = batch_dict.pop('played_frames')
         self.prepare_dataset(batch_dict)
         self.algo_observer.after_steps()
-        if self.has_central_value:
-            self.train_central_value()
 
         a_losses = []
         c_losses = []
         cost_losses = []
-        penalty_losses = []
         b_losses = []
         entropies = []
         kls = []
@@ -905,12 +760,11 @@ class ContinuousPPOLagBase(PPOLagBase):
         for mini_ep in range(0, self.mini_epochs_num):
             ep_kls = []
             for i in range(len(self.dataset)):
-                a_loss, c_loss, cost_loss, penalty_loss, entropy, kl, last_lr, lr_mul, cmu, csigma, b_loss = self.train_actor_critic(self.dataset[i])
+                a_loss, c_loss, cost_loss, entropy, kl, last_lr, lr_mul, cmu, csigma, b_loss, kl_end = self.train_actor_critic(self.dataset[i])
                 a_losses.append(a_loss)
                 c_losses.append(c_loss)
                 cost_losses.append(cost_loss)
-                penalty_losses.append(penalty_loss)
-                ep_kls.append(kl)
+                ep_kls.append(kl.mean())
                 entropies.append(entropy)
                 if self.bounds_loss_coef is not None:
                     b_losses.append(b_loss)
@@ -918,37 +772,31 @@ class ContinuousPPOLagBase(PPOLagBase):
                 self.dataset.update_mu_sigma(cmu, csigma)   
 
                 if self.schedule_type == 'legacy':  
-                    if self.multi_gpu:
-                        kl = self.hvd.average_value(kl, 'ep_kls')
-                    self.last_lr, self.entropy_coef = self.scheduler.update(self.last_lr, self.entropy_coef, self.epoch_num, 0,kl.item())
+                    self.last_lr, self.entropy_coef = self.scheduler.update(self.last_lr, self.entropy_coef, self.epoch_num, 0,kl.mean().item())
                     self.update_lr(self.last_lr)
 
             av_kls = torch_ext.mean_list(ep_kls)
 
             if self.schedule_type == 'standard':
-                if self.multi_gpu:
-                    av_kls = self.hvd.average_value(av_kls, 'ep_kls')
                 self.last_lr, self.entropy_coef = self.scheduler.update(self.last_lr, self.entropy_coef, self.epoch_num, 0,av_kls.item())
                 self.update_lr(self.last_lr)
             kls.append(av_kls)
             self.diagnostics.mini_epoch(self, mini_ep)
             if self.normalize_input:
                 self.model.running_mean_std.eval() # don't need to update statstics more than one miniepoch
+
+            if kl_end > self.delta:
+                break
         if self.schedule_type == 'standard_epoch':
-            if self.multi_gpu:
-                av_kls = self.hvd.average_value(torch_ext.mean_list(kls), 'ep_kls')
             self.last_lr, self.entropy_coef = self.scheduler.update(self.last_lr, self.entropy_coef, self.epoch_num, 0,av_kls.item())
             self.update_lr(self.last_lr)
-
-        if self.has_phasic_policy_gradients:
-            self.ppg_aux_loss.train_net(self)
 
         update_time_end = time.time()
         play_time = play_time_end - play_time_start
         update_time = update_time_end - update_time_start
         total_time = update_time_end - play_time_start
 
-        return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, cost_losses, b_losses, penalty_losses, entropies, kls, last_lr, lr_mul
+        return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul
 
     def prepare_dataset(self, batch_dict):
         obses = batch_dict['obses']
@@ -1012,17 +860,6 @@ class ContinuousPPOLagBase(PPOLagBase):
 
         self.dataset.update_values_dict(dataset_dict)
 
-        if self.has_central_value:
-            dataset_dict = {}
-            dataset_dict['old_values'] = values
-            dataset_dict['advantages'] = advantages
-            dataset_dict['returns'] = returns
-            dataset_dict['actions'] = actions
-            dataset_dict['obs'] = batch_dict['states']
-            dataset_dict['dones'] = dones
-            dataset_dict['rnn_masks'] = rnn_masks
-            self.central_value_net.update_dataset(dataset_dict)
-
     def train(self):
         self.init_tensors()
         self.last_mean_rewards = -100500
@@ -1032,16 +869,11 @@ class ContinuousPPOLagBase(PPOLagBase):
         self.obs = self.env_reset()
         self.curr_frames = self.batch_size_envs
 
-        if self.multi_gpu:
-            self.hvd.setup_algo(self)
-
         while True:
             epoch_num = self.update_epoch()
-            step_time, play_time, update_time, sum_time, a_losses, c_losses, cost_losses, b_losses, penalty_losses, entropies, kls, last_lr, lr_mul = self.train_epoch()
+            step_time, play_time, update_time, sum_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul = self.train_epoch()
             total_time += sum_time
             frame = self.frame // self.num_agents
-            if self.multi_gpu:
-                self.hvd.sync_stats(self)
             # cleaning memory to optimize space
             self.dataset.update_values_dict(None)
             should_exit = False
@@ -1062,9 +894,6 @@ class ContinuousPPOLagBase(PPOLagBase):
                 if len(b_losses) > 0:
                     self.writer.add_scalar('losses/bounds_loss', torch_ext.mean_list(b_losses).item(), frame)
 
-                if self.has_soft_aug:
-                    self.writer.add_scalar('losses/aug_loss', np.mean(aug_losses), frame)
-
                 
                 if self.game_rewards.current_size > 0:
                     mean_rewards = self.game_rewards.get_mean()
@@ -1072,8 +901,7 @@ class ContinuousPPOLagBase(PPOLagBase):
                     mean_lengths = self.game_lengths.get_mean()
                     self.mean_rewards = mean_rewards[0]
 
-                    self.writer.add_scalar('losses/penalty_loss', torch_ext.mean_list(penalty_losses).item(), frame)
-                    self.writer.add_scalar('info/penalty', self.penalty, frame)
+                    self.writer.add_scalar('info/nu', self.nu, frame)
 
                     for i in range(self.value_size):
                         rewards_name = 'rewards' if i == 0 else 'rewards{0}'.format(i)
@@ -1086,10 +914,6 @@ class ContinuousPPOLagBase(PPOLagBase):
                         self.writer.add_scalar(costs_name + '/step'.format(i), mean_costs[i], frame)
                         self.writer.add_scalar(costs_name + '/iter'.format(i), mean_costs[i], epoch_num)
                         self.writer.add_scalar(costs_name + '/time'.format(i), mean_costs[i], total_time)
-                        costs_name = 'curcosts' if i == 0 else 'costs{0}'.format(i)
-                        self.writer.add_scalar(costs_name + '/step'.format(i), self.game_costs_cur.get_mean()[i], frame)
-                        self.writer.add_scalar(costs_name + '/iter'.format(i), self.game_costs_cur.get_mean()[i], epoch_num)
-                        self.writer.add_scalar(costs_name + '/time'.format(i), self.game_costs_cur.get_mean()[i], total_time)
 
                     self.writer.add_scalar('episode_lengths/step', mean_lengths, frame)
                     self.writer.add_scalar('episode_lengths/iter', mean_lengths, epoch_num)
@@ -1120,22 +944,16 @@ class ContinuousPPOLagBase(PPOLagBase):
                     should_exit = True
 
                 update_time = 0
-            if self.multi_gpu:
-                    should_exit_t = torch.tensor(should_exit).float()
-                    self.hvd.broadcast_value(should_exit_t, 'should_exit')
-                    should_exit = should_exit_t.float().item()
             if should_exit:
                 return self.last_mean_rewards, epoch_num
 
-from rl_games.algos_torch import central_value
 from rl_games.common import datasets
 from rl_games.algos_torch import ppg_aux
-from rl_games.common.ewma_model import EwmaModel
 from torch import optim
 
-class PPOLagAgent(ContinuousPPOLagBase):
+class FOCOPSAgent(ContinuousFOCOPSBase):
     def __init__(self, base_name, params):
-        ContinuousPPOLagBase.__init__(self, base_name, params)
+        ContinuousFOCOPSBase.__init__(self, base_name, params)
         obs_shape = self.obs_shape
         build_config = {
             'actions_num' : self.actions_num,
@@ -1147,46 +965,19 @@ class PPOLagAgent(ContinuousPPOLagBase):
         }
         
         self.model = self.network.build(build_config)
-        self.model.to(self.ppo_device)
+        self.model.to(self.device)
         self.states = None
-        if self.ewma_ppo:
-            self.ewma_model = EwmaModel(self.model, ewma_decay=0.889)
         self.init_rnn_from_model(self.model)
         self.last_lr = float(self.last_lr)
         self.bound_loss_type = self.config.get('bound_loss_type', 'bound') # 'regularisation' or 'bound'
         self.optimizer = optim.Adam(self.model.parameters(), float(self.last_lr), eps=1e-08, weight_decay=self.weight_decay)
-        self.optimizer_penalty = optim.Adam([self.penalty_param], float(params["config"]["plr"]), eps=1e-08, weight_decay=self.weight_decay)
-        
-        if self.has_central_value:
-            cv_config = {
-                'state_shape' : self.state_shape, 
-                'value_size' : self.value_size,
-                'ppo_device' : self.ppo_device, 
-                'num_agents' : self.num_agents, 
-                'horizon_length' : self.horizon_length,
-                'num_actors' : self.num_actors, 
-                'num_actions' : self.actions_num, 
-                'seq_len' : self.seq_len,
-                'normalize_value' : self.normalize_value,
-                'network' : self.central_value_config['network'],
-                'config' : self.central_value_config, 
-                'writter' : self.writer,
-                'max_epochs' : self.max_epochs,
-                'multi_gpu' : self.multi_gpu,
-                'hvd': self.hvd if self.multi_gpu else None
-            }
-            self.central_value_net = central_value.CentralValueTrain(**cv_config).to(self.ppo_device)
 
         self.use_experimental_cv = self.config.get('use_experimental_cv', True)
-        self.dataset = datasets.PPODataset(self.batch_size, self.minibatch_size, self.is_discrete, self.is_rnn, self.ppo_device, self.seq_len)
+        self.dataset = datasets.PPODataset(self.batch_size, self.minibatch_size, self.is_discrete, self.is_rnn, self.device, self.seq_len)
         if self.normalize_value:
-            self.value_mean_std = self.central_value_net.model.value_mean_std if self.has_central_value else self.model.value_mean_std
-            self.costv_mean_std = self.central_value_net.model.costv_mean_std if self.has_central_value else self.model.costv_mean_std
-        if 'phasic_policy_gradients' in self.config:
-            self.has_phasic_policy_gradients = True
-            self.ppg_aux_loss = ppg_aux.PPGAux(self, self.config['phasic_policy_gradients'])
-        self.has_value_loss = (self.has_central_value and self.use_experimental_cv) \
-                            or (not self.has_phasic_policy_gradients and not self.has_central_value) 
+            self.value_mean_std = self.model.value_mean_std
+            self.costv_mean_std = self.model.costv_mean_std
+        self.has_value_loss = True
         self.algo_observer.after_init(self)
 
     def update_epoch(self):
@@ -1242,92 +1033,55 @@ class PPOLagAgent(ContinuousPPOLagBase):
             mu = res_dict['mus']
             sigma = res_dict['sigmas']
 
-            penalty_loss = torch.tensor(0.).float().to(self.ppo_device)
-            if self.game_costs_cur.current_size > 0:
-                mean_costs = self.game_costs_cur.get_mean()  
-                if not self.is_pid:  
-                    # for i in range(10):        
-                    self.optimizer_penalty.zero_grad()
-                    penalty_loss = -self.penalty*torch.from_numpy(mean_costs-self.safety_bound).to(self.ppo_device)
-                    penalty_loss.backward()
-                    self.optimizer_penalty.step()
-                else:
-                    # current_error = mean_costs[0]-self.safety_bound
-                    # self.i_error = self.i_error + current_error
-                    # self.d_error = current_error - self.p_error
-                    # self.p_error = current_error  
-                    # current_update = self.k_p * self.p_error + self.k_i * self.i_error + self.k_d * self.d_error
-                    # current_update = np.maximum(current_update, -18.0)
-                    # self.penalty_param.data.copy_(torch.tensor(current_update).float().to(self.ppo_device))
+            reduce_kl = rnn_masks is None
+            kl_dist = torch_ext.policy_kl(mu, sigma, old_mu_batch, old_sigma_batch, reduce=False)
+            if rnn_masks is not None:
+                kl_dist = (kl_dist * rnn_masks).sum() / rnn_masks.numel()  #/ sum_mask   
 
-                    delta = mean_costs[0]-self.safety_bound
-                    self.i_error =  max(0., self.i_error + delta * self.k_i)
-                    self.d_error = delta - self.p_error
-                    self.p_error = 0*self.p_error + 1*delta
-                    self.cost_penalty_pid = max(0, self.i_error+self.d_error*self.k_d+self.p_error*self.k_p)
-                    self.penalty_param.data.copy_(torch.tensor(self.cost_penalty_pid).float().to(self.ppo_device))
+            if self.game_rewards.current_size > 0:
+                mean_costs = self.game_costs.get_mean()  
+                self.nu += self.nu_lr * (mean_costs - self.safety_bound)
+                if self.nu < 0:
+                    self.nu = 0
+                elif self.nu > self.nu_max:
+                    self.nu = self.nu_max
 
-
-            if self.ewma_ppo:
-                ewma_dict = self.ewma_model(batch_dict)
-                proxy_neglogp = ewma_dict['prev_neglogp']
-                a_loss = decoupled_actor_loss(old_action_log_probs_batch, action_log_probs, proxy_neglogp, advantage, curr_e_clip)
-                old_action_log_probs_batch = proxy_neglogp # to get right statistic later
-                old_mu_batch = ewma_dict['mus']
-                old_sigma_batch = ewma_dict['sigmas']
-            else:
-                a_loss = self.actor_loss_func(old_action_log_probs_batch, action_log_probs, advantage, self.ppo, curr_e_clip, cost_advantage, self.penalty.detach())
+            ratio = torch.exp(-action_log_probs + old_action_log_probs_batch)
+            a_loss = (kl_dist - (1 / self.lam) * ratio * (advantage - self.nu * cost_advantage)) \
+                          * (kl_dist.detach() <= self.eta).type(torch.float32)
 
             if self.has_value_loss:
                 c_loss = critic_loss(value_preds_batch, values, curr_e_clip, return_batch, self.clip_value)
                 cost_loss = critic_loss(cost_preds_batch, costvs, curr_e_clip, cost_return_batch, self.clip_value)
             else:
-                c_loss = torch.zeros(1, device=self.ppo_device)
-                cost_loss = torch.zeros(1, device=self.ppo_device)
+                c_loss = torch.zeros(1, device=self.device)
+                cost_loss = torch.zeros(1, device=self.device)
             if self.bound_loss_type == 'regularisation':
                 b_loss = self.reg_loss(mu)
             elif self.bound_loss_type == 'bound':
                 b_loss = self.bound_loss(mu)
             else:
-                b_loss = torch.zeros(1, device=self.ppo_device)
+                b_loss = torch.zeros(1, device=self.device)
             losses, sum_mask = torch_ext.apply_masks([a_loss.unsqueeze(1), c_loss, cost_loss, entropy.unsqueeze(1), b_loss.unsqueeze(1)], rnn_masks)
             a_loss, c_loss, cost_loss, entropy, b_loss = losses[0], losses[1], losses[2], losses[3], losses[4]
 
-            loss = a_loss + 0.5 * c_loss * self.critic_coef + 0.5 * cost_loss * self.critic_coef  - entropy * self.entropy_coef + b_loss * self.bounds_loss_coef
+            loss = a_loss + 0.5 * c_loss * self.critic_coef + 0.5 * cost_loss * self.critic_coef  
+            # - entropy * self.entropy_coef 
+            + b_loss * self.bounds_loss_coef
             
-            if self.multi_gpu:
-                self.optimizer.zero_grad()
-            else:
-                for param in self.model.parameters():
-                    param.grad = None
+            for param in self.model.parameters():
+                param.grad = None
 
         self.scaler.scale(loss).backward()
         #TODO: Refactor this ugliest code of they year
         if self.truncate_grads:
-            if self.multi_gpu:
-                self.optimizer.synchronize()
-                self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
-                with self.optimizer.skip_synchronize():
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-            else:
-                self.scaler.unscale_(self.optimizer)
-                nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()    
+            self.scaler.unscale_(self.optimizer)
+            nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_norm)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()    
         else:
             self.scaler.step(self.optimizer)
-            self.scaler.update()
-
-        with torch.no_grad():
-            reduce_kl = rnn_masks is None
-            kl_dist = torch_ext.policy_kl(mu.detach(), sigma.detach(), old_mu_batch, old_sigma_batch, reduce_kl)
-            if rnn_masks is not None:
-                kl_dist = (kl_dist * rnn_masks).sum() / rnn_masks.numel()  #/ sum_mask
-
-        if self.ewma_ppo:
-            self.ewma_model.update()                    
+            self.scaler.update()              
 
         self.diagnostics.mini_batch(self,
         {
@@ -1338,9 +1092,13 @@ class PPOLagAgent(ContinuousPPOLagBase):
             'masks' : rnn_masks
         }, curr_e_clip, 0)      
 
-        self.train_result = (a_loss, c_loss, cost_loss, penalty_loss, entropy, \
+        res_dict = self.model(batch_dict)
+        mu = res_dict['mus']
+        sigma = res_dict['sigmas']
+        kl_end = torch_ext.policy_kl(mu, sigma, old_mu_batch, old_sigma_batch).item()
+        self.train_result = (a_loss, c_loss, cost_loss, entropy, \
             kl_dist, self.last_lr, lr_mul, \
-            mu.detach(), sigma.detach(), b_loss)
+            mu.detach(), sigma.detach(), b_loss, kl_end)
 
     def train_actor_critic(self, input_dict):
         self.calc_gradients(input_dict)
