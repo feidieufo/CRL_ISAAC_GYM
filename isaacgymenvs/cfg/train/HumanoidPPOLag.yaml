@@ -64,11 +64,16 @@ params:
     truncate_grads: True
     ppo: True
     e_clip: 0.2
-    horizon_length: 32
+    horizon_length: 2048
     minibatch_size: 32768
     mini_epochs: 5
     critic_coef: 4
     clip_value: True
     seq_len: 4
     bounds_loss_coef: 0.0001
-    safety_bound: 10
+    safety_bound: 2000
+    is_pid: True
+    pid_kp: 0.1
+    pid_ki: 0.01
+    pid_kd: 0.
+  

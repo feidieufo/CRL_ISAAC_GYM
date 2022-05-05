@@ -43,6 +43,7 @@ from tasks.trifinger import Trifinger
 from tasks.humanoid_cost import HumanoidCost
 from tasks.ant_cost import AntCost
 from tasks.ant_speed_cost import AntSpeedCost
+from tasks.humanoid_speed_cost import HumanoidSpeedCost
 
 # Mappings from strings to environments
 isaacgym_task_map = {
@@ -62,4 +63,5 @@ isaacgym_task_map = {
     "HumanoidCost": HumanoidCost,
     "AntCost": AntCost,
     "AntSpeedCost": AntSpeedCost,
+    "HumanoidSpeedCost": HumanoidSpeedCost,
 }
