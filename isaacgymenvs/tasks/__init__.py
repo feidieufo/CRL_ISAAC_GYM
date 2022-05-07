@@ -44,6 +44,7 @@ from tasks.humanoid_cost import HumanoidCost
 from tasks.ant_cost import AntCost
 from tasks.ant_speed_cost import AntSpeedCost
 from tasks.humanoid_speed_cost import HumanoidSpeedCost
+from tasks.franka_cabinet_cost import FrankaCabinetCost
 
 # Mappings from strings to environments
 isaacgym_task_map = {
@@ -64,4 +65,5 @@ isaacgym_task_map = {
     "AntCost": AntCost,
     "AntSpeedCost": AntSpeedCost,
     "HumanoidSpeedCost": HumanoidSpeedCost,
+    "FrankaCabinetCost": FrankaCabinetCost,
 }

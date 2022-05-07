@@ -257,6 +257,7 @@ class PPOLagBase(BaseAlgorithm):
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.mixed_precision)
 
         self.last_lr = self.config['learning_rate']
+        self.gammac = self.config.get('gammac', 0.99)
         self.frame = 0
         self.update_time = 0
         self.mean_rewards = self.last_mean_rewards = -100500
@@ -717,7 +718,7 @@ class PPOLagBase(BaseAlgorithm):
             self.experience_buffer.update_data('costs', n, shaped_costs)
 
             self.current_rewards += rewards
-            self.current_costs += infos["cost"]
+            self.current_costs += (self.gammac**(self.current_lengths).unsqueeze(1))*infos["cost"]
             self.current_lengths += 1
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = self.dones.view(self.num_actors, self.num_agents).all(dim=1).nonzero(as_tuple=False)
@@ -797,7 +798,7 @@ class PPOLagBase(BaseAlgorithm):
             self.experience_buffer.update_data('rewards', n, shaped_rewards)
 
             self.current_rewards += rewards
-            self.current_costs += infos["cost"]
+            self.current_costs += (self.gammac**(self.current_lengths).unsqueeze(1))*infos["cost"]
             self.current_lengths += 1
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = self.dones.view(self.num_actors, self.num_agents).all(dim=1).nonzero(as_tuple=False)
@@ -1243,8 +1244,8 @@ class PPOLagAgent(ContinuousPPOLagBase):
             sigma = res_dict['sigmas']
 
             penalty_loss = torch.tensor(0.).float().to(self.ppo_device)
-            if self.game_costs_cur.current_size > 0:
-                mean_costs = self.game_costs_cur.get_mean()  
+            if self.game_costs.current_size > 0:
+                mean_costs = self.game_costs.get_mean()  
                 if not self.is_pid:  
                     # for i in range(10):        
                     self.optimizer_penalty.zero_grad()

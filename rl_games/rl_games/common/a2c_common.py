@@ -191,6 +191,7 @@ class A2CBase(BaseAlgorithm):
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.mixed_precision)
 
         self.last_lr = self.config['learning_rate']
+        self.gammac = self.config.get('gammac', 0.99)
         self.frame = 0
         self.update_time = 0
         self.mean_rewards = self.last_mean_rewards = -100500
@@ -631,7 +632,7 @@ class A2CBase(BaseAlgorithm):
             self.experience_buffer.update_data('rewards', n, shaped_rewards)
 
             self.current_rewards += rewards
-            self.current_costs += infos["cost"]
+            self.current_costs += (self.gammac**(self.current_lengths).unsqueeze(1))*infos["cost"]
             self.current_lengths += 1
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = self.dones.view(self.num_actors, self.num_agents).all(dim=1).nonzero(as_tuple=False)
@@ -704,7 +705,7 @@ class A2CBase(BaseAlgorithm):
             self.experience_buffer.update_data('rewards', n, shaped_rewards)
 
             self.current_rewards += rewards
-            self.current_costs += infos["cost"]
+            self.current_costs += (self.gammac**(self.current_lengths).unsqueeze(1))*infos["cost"]
             self.current_lengths += 1
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = self.dones.view(self.num_actors, self.num_agents).all(dim=1).nonzero(as_tuple=False)

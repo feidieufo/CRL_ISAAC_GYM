@@ -1,5 +1,5 @@
 # used to create the object
-name: HumanoidCost
+name: HumanoidSpeedCost
 
 physics_engine: ${..physics_engine}
 

@@ -87,7 +87,7 @@ class SACAgent(BaseAlgorithm):
         print("Target entropy", self.target_entropy)
         self.step = 0
         self.algo_observer = config['features']['observer']
-
+        self.gammac = self.config.get('gammac', 0.99)
 
         # TODO: Is there a better way to get the maximum number of episodes?
         self.max_episodes = torch.ones(self.num_actors, device=self.sac_device)*self.num_steps_per_episode
@@ -401,7 +401,7 @@ class SACAgent(BaseAlgorithm):
             step_end = time.time()
 
             self.current_rewards += rewards
-            self.current_costs += infos["cost"]
+            self.current_costs += (self.gammac**(self.current_lengths))*infos["cost"]
             self.current_lengths += 1
 
             total_time += step_end - step_start
