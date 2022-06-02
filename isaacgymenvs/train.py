@@ -53,6 +53,7 @@ from isaacgymenvs.learning import amp_network_builder
 from isaacgymenvs.learning import ppolag_continuous
 from isaacgymenvs.learning import saclag_agent
 from isaacgymenvs.learning import focops
+from isaacgymenvs.learning import p3o_continuous
 import wandb
 
 ## OmegaConf & Hydra Config
@@ -109,6 +110,7 @@ def launch_rlg_hydra(cfg: DictConfig):
         runner.algo_factory.register_builder('ppolag', lambda **kwargs : ppolag_continuous.PPOLagAgent(**kwargs))
         runner.algo_factory.register_builder('saclag', lambda **kwargs : saclag_agent.SACLagAgent(**kwargs))
         runner.algo_factory.register_builder('focops', lambda **kwargs : focops.FOCOPSAgent(**kwargs))
+        runner.algo_factory.register_builder('p3o', lambda **kwargs : p3o_continuous.P3OAgent(**kwargs))
         # runner.model_builder.model_factory.register_builder('continuous_amp', lambda network, **kwargs : amp_models.ModelAMPContinuous(network))  
         # runner.model_builder.network_factory.register_builder('amp', lambda **kwargs : amp_network_builder.AMPBuilder())
 
