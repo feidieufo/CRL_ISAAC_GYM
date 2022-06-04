@@ -25,16 +25,18 @@ class BaseModel():
         normalize_value = config.get('normalize_value', False)
         normalize_input = config.get('normalize_input', False)
         value_size = config.get('value_size', 1)
+        num_cost = config.get('num_cost', 1)
         return self.Network(self.network_builder.build(self.model_class, **config), obs_shape=obs_shape,
-            normalize_value=normalize_value, normalize_input=normalize_input, value_size=value_size)
+            normalize_value=normalize_value, normalize_input=normalize_input, value_size=value_size, num_cost=num_cost)
 
 class BaseModelNetwork(nn.Module):
-    def __init__(self, obs_shape, normalize_value, normalize_input, value_size):
+    def __init__(self, obs_shape, normalize_value, normalize_input, value_size, num_cost):
         nn.Module.__init__(self)
         self.obs_shape = obs_shape
         self.normalize_value = normalize_value
         self.normalize_input = normalize_input
         self.value_size = value_size
+        self.num_cost = num_cost
 
         if normalize_value:
             self.value_mean_std = RunningMeanStd((self.value_size,))
@@ -171,7 +173,7 @@ class ModelPPOLagContinuousLogStd(BaseModel):
             BaseModelNetwork.__init__(self, **kwargs)
             self.ppolag_network = ppolag_network
             if self.normalize_value:
-                self.costv_mean_std = RunningMeanStd((self.value_size,))
+                self.costv_mean_std = RunningMeanStd((self.num_cost,))
 
         def is_rnn(self):
             return self.ppolag_network.is_rnn()

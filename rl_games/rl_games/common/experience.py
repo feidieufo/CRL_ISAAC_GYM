@@ -325,7 +325,7 @@ class ExperienceBuffer:
             self._init_from_aux_dict(self.aux_tensor_dict)
 
         if has_cost:
-            val_space = gym.spaces.Box(low=0, high=1,shape=(env_info.get('value_size',1),))
+            val_space = gym.spaces.Box(low=0, high=1,shape=(env_info.get('num_cost',1),))
             self.tensor_dict['costs'] = self._create_tensor_from_space(val_space, self.obs_base_shape)
             self.tensor_dict['costvs'] = self._create_tensor_from_space(val_space, self.obs_base_shape)            
 

@@ -71,4 +71,4 @@ params:
     seq_len: 4
     bounds_loss_coef: 0.0001
     safety_bound: 200
-    penalty_k: 20
+    penalty_k: 1

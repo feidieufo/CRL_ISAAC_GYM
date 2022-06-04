@@ -1,4 +1,5 @@
 import os
+from matplotlib.pyplot import axis
 
 from rl_games.common import tr_helpers
 from rl_games.common import vecenv
@@ -65,9 +66,10 @@ def actor_loss(old_action_neglog_probs_batch, action_neglog_probs, advantage, is
     else:
         a_loss = (action_neglog_probs * advantage)
 
-    surr_cost = ratio * cost_advantage
-    a_loss += penalty*surr_cost
-    a_loss /= (1 + penalty)
+    surr_cost = ratio.unsqueeze(1) * cost_advantage
+    surr_cost = penalty.unsqueeze(0)*surr_cost
+    a_loss += surr_cost.sum(axis=1)
+    a_loss /= (1 + penalty.sum())
     return a_loss
 
 def decoupled_actor_loss(behavior_action_neglog_probs, action_neglog_probs, proxy_neglog_probs, advantage, curr_e_clip):
@@ -149,6 +151,8 @@ class PPOLagBase(BaseAlgorithm):
             self.vec_env = vecenv.create_vec_env(self.env_name, self.num_actors, **self.env_config)
             self.env_info = self.vec_env.get_env_info()
 
+        self.num_cost = self.vec_env.env.cfg.get("num_cost", 1)
+        self.env_info.update({"num_cost": self.num_cost})
         self.ppo_device = config.get('device', 'cuda:0')
         print('Env info:')
         print(self.env_info)
@@ -163,13 +167,17 @@ class PPOLagBase(BaseAlgorithm):
         self.central_value_config = self.config.get('central_value_config', None)
         self.has_central_value = self.central_value_config is not None
         self.truncate_grads = self.config.get('truncate_grads', False)
-        self.safety_bound = self.config.get('safety_bound', -1)
+        self.safety_bound = [100000000.0]*self.num_cost
+        self.safety_bound[0] = self.config.get('safety_bound', 100000000)
+        if self.num_cost > 1:
+            self.safety_bound[1] = self.config.get('safety_bound1', 100000000)
+
         self.k_p = self.config.get('pid_kp', 0.)
         self.k_i = self.config.get('pid_ki', 0.)
         self.k_d = self.config.get('pid_kd', 0.)
-        self.p_error = 0
-        self.i_error = 0
-        self.d_error = 0
+        self.p_error = [0.]*self.num_cost
+        self.i_error = [0.]*self.num_cost
+        self.d_error = [0.]*self.num_cost
         self.is_pid = self.config.get('is_pid', False)
 
         if self.has_central_value:
@@ -210,7 +218,7 @@ class PPOLagBase(BaseAlgorithm):
             self.scheduler = schedulers.IdentityScheduler()
 
         self.e_clip = nn.Parameter(torch.tensor(config['e_clip'], requires_grad=True, dtype=torch.float32, device= self.ppo_device), requires_grad=True)
-        param_init = torch.tensor(np.log(max(np.exp(1.)-1, 1e-8)), requires_grad=True, dtype=torch.float32, device= self.ppo_device)
+        param_init = torch.tensor(np.log(np.exp([1.]*self.num_cost)-1), requires_grad=True, dtype=torch.float32, device= self.ppo_device)
         self.penalty_param = nn.Parameter(torch.tensor(param_init), requires_grad=True)
         self.clip_value = config['clip_value']
         self.network = config['network']
@@ -241,8 +249,8 @@ class PPOLagBase(BaseAlgorithm):
         self.games_to_track = self.config.get('games_to_track', 100)
         print(self.ppo_device)
         self.game_rewards = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_costs = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_costs_cur = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
+        self.game_costs = torch_ext.AverageMeter(self.num_cost, self.games_to_track).to(self.ppo_device)
+        self.game_costs_cur = torch_ext.AverageMeter(self.num_cost, self.games_to_track).to(self.ppo_device)
         self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.ppo_device)
         self.obs = None
         self.games_num = self.config['minibatch_size'] // self.seq_len # it is used only for current rnn implementation
@@ -460,7 +468,7 @@ class PPOLagBase(BaseAlgorithm):
         val_shape = (self.horizon_length, batch_size, self.value_size)
         current_rewards_shape = (batch_size, self.value_size)
         self.current_rewards = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
-        self.current_costs = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
+        self.current_costs = torch.zeros((batch_size, self.num_cost), dtype=torch.float32, device=self.ppo_device)
         self.current_lengths = torch.zeros(batch_size, dtype=torch.float32, device=self.ppo_device)
         self.dones = torch.ones((batch_size,), dtype=torch.uint8, device=self.ppo_device)
 
@@ -520,11 +528,13 @@ class PPOLagBase(BaseAlgorithm):
         if self.is_tensor_obses:
             if self.value_size == 1:
                 rewards = rewards.unsqueeze(1)
+            if self.num_cost == 1:
                 infos["cost"] = infos["cost"].unsqueeze(1)
             return self.obs_to_tensors(obs), rewards.to(self.ppo_device), dones.to(self.ppo_device), infos
         else:
             if self.value_size == 1:
                 rewards = np.expand_dims(rewards, axis=1)
+            if self.num_cost == 1:
                 infos["cost"] = np.expand_dims(infos["cost"], axis=1)
             return self.obs_to_tensors(obs), torch.from_numpy(rewards).to(self.ppo_device).float(), torch.from_numpy(dones).to(self.ppo_device), infos
 
@@ -980,7 +990,7 @@ class ContinuousPPOLagBase(PPOLagBase):
             self.costv_mean_std.eval()
 
         advantages = torch.sum(advantages, axis=1)
-        cost_advantages = torch.sum(cost_advantages, axis=1)
+        # cost_advantages = torch.sum(cost_advantages, axis=1)
 
         if self.normalize_advantage:
             if self.is_rnn:
@@ -993,7 +1003,7 @@ class ContinuousPPOLagBase(PPOLagBase):
                     advantages = self.advantage_mean_std(advantages)
                 else:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+        cost_advantages = (cost_advantages - cost_advantages.mean(axis=0)) / (cost_advantages.std(axis=0) + 1e-8)
 
         dataset_dict = {}
         dataset_dict['old_values'] = values
@@ -1074,7 +1084,9 @@ class ContinuousPPOLagBase(PPOLagBase):
                     self.mean_rewards = mean_rewards[0]
 
                     self.writer.add_scalar('losses/penalty_loss', torch_ext.mean_list(penalty_losses).item(), frame)
-                    self.writer.add_scalar('info/penalty', self.penalty, frame)
+                    for i in range(self.num_cost):
+                        penalty_name = 'info/penalty' if i == 0 else 'info/penalty{0}'.format(i)
+                        self.writer.add_scalar(penalty_name, self.penalty[i], frame)
 
                     for i in range(self.value_size):
                         rewards_name = 'rewards' if i == 0 else 'rewards{0}'.format(i)
@@ -1082,7 +1094,7 @@ class ContinuousPPOLagBase(PPOLagBase):
                         self.writer.add_scalar(rewards_name + '/iter'.format(i), mean_rewards[i], epoch_num)
                         self.writer.add_scalar(rewards_name + '/time'.format(i), mean_rewards[i], total_time)
 
-                    for i in range(self.value_size):
+                    for i in range(self.num_cost):
                         costs_name = 'costs' if i == 0 else 'costs{0}'.format(i)
                         self.writer.add_scalar(costs_name + '/step'.format(i), mean_costs[i], frame)
                         self.writer.add_scalar(costs_name + '/iter'.format(i), mean_costs[i], epoch_num)
@@ -1145,6 +1157,7 @@ class PPOLagAgent(ContinuousPPOLagBase):
             'value_size': self.env_info.get('value_size',1),
             'normalize_value' : self.normalize_value,
             'normalize_input': self.normalize_input,
+            'num_cost': self.num_cost,
         }
         
         self.model = self.network.build(build_config)
@@ -1261,11 +1274,13 @@ class PPOLagAgent(ContinuousPPOLagBase):
                     # current_update = np.maximum(current_update, -18.0)
                     # self.penalty_param.data.copy_(torch.tensor(current_update).float().to(self.ppo_device))
 
-                    delta = mean_costs[0]-self.safety_bound
-                    self.i_error =  max(0., self.i_error + delta * self.k_i)
-                    self.d_error = delta - self.p_error
-                    self.p_error = 0*self.p_error + 1*delta
-                    self.cost_penalty_pid = max(0, self.i_error+self.d_error*self.k_d+self.p_error*self.k_p)
+                    self.cost_penalty_pid = [0.]*self.num_cost
+                    for (i, safety) in enumerate(self.safety_bound):
+                        delta = mean_costs[i]-self.safety_bound[i]
+                        self.i_error[i] =  max(0., self.i_error[i] + delta * self.k_i)
+                        self.d_error[i] = delta - self.p_error[i]
+                        self.p_error[i] = 0*self.p_error[i] + 1*delta
+                        self.cost_penalty_pid[i] = max(0, self.i_error[i]+self.d_error[i]*self.k_d+self.p_error[i]*self.k_p)
                     self.penalty_param.data.copy_(torch.tensor(self.cost_penalty_pid).float().to(self.ppo_device))
 
 

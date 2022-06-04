@@ -63,8 +63,8 @@ def actor_loss(old_action_neglog_probs_batch, action_neglog_probs, advantage, is
         surr2 = advantage * torch.clamp(ratio, 1.0 - curr_e_clip, 1.0 + curr_e_clip)
         a_loss = torch.max(-surr1, -surr2)
 
-        c_surr1 = cost_advantage * ratio
-        c_surr2 = cost_advantage * torch.clamp(ratio, 1.0 - curr_e_clip, 1.0 + curr_e_clip)
+        c_surr1 = cost_advantage * ratio.unsqueeze(1)
+        c_surr2 = cost_advantage * torch.clamp(ratio.unsqueeze(1), 1.0 - curr_e_clip, 1.0 + curr_e_clip)
         a1_loss = torch.min(c_surr1, c_surr2)
     else:
         a_loss = (action_neglog_probs * advantage)
@@ -141,6 +141,8 @@ class PPOLagBase(BaseAlgorithm):
             self.vec_env = vecenv.create_vec_env(self.env_name, self.num_actors, **self.env_config)
             self.env_info = self.vec_env.get_env_info()
 
+        self.num_cost = self.vec_env.env.cfg.get("num_cost", 1)
+        self.env_info.update({"num_cost": self.num_cost})
         self.ppo_device = config.get('device', 'cuda:0')
         print('Env info:')
         print(self.env_info)
@@ -155,7 +157,10 @@ class PPOLagBase(BaseAlgorithm):
         self.central_value_config = self.config.get('central_value_config', None)
         self.has_central_value = self.central_value_config is not None
         self.truncate_grads = self.config.get('truncate_grads', False)
-        self.safety_bound = self.config.get('safety_bound', -1)
+        self.safety_bound = [100000000.0]*self.num_cost
+        self.safety_bound[0] = self.config.get('safety_bound', 100000000)
+        if self.num_cost > 1:
+            self.safety_bound[1] = self.config.get('safety_bound1', 100000000)
         self.penalty_k = self.config.get('penalty_k', 1)
 
         if self.has_central_value:
@@ -227,8 +232,8 @@ class PPOLagBase(BaseAlgorithm):
         self.games_to_track = self.config.get('games_to_track', 100)
         print(self.ppo_device)
         self.game_rewards = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_costs = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_costs_cur = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
+        self.game_costs = torch_ext.AverageMeter(self.num_cost, self.games_to_track).to(self.ppo_device)
+        self.game_costs_cur = torch_ext.AverageMeter(self.num_cost, self.games_to_track).to(self.ppo_device)
         self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.ppo_device)
         self.obs = None
         self.games_num = self.config['minibatch_size'] // self.seq_len # it is used only for current rnn implementation
@@ -447,7 +452,7 @@ class PPOLagBase(BaseAlgorithm):
         val_shape = (self.horizon_length, batch_size, self.value_size)
         current_rewards_shape = (batch_size, self.value_size)
         self.current_rewards = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
-        self.current_costs = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
+        self.current_costs = torch.zeros((batch_size, self.num_cost), dtype=torch.float32, device=self.ppo_device)
         self.current_lengths = torch.zeros(batch_size, dtype=torch.float32, device=self.ppo_device)
         self.dones = torch.ones((batch_size,), dtype=torch.uint8, device=self.ppo_device)
 
@@ -507,11 +512,13 @@ class PPOLagBase(BaseAlgorithm):
         if self.is_tensor_obses:
             if self.value_size == 1:
                 rewards = rewards.unsqueeze(1)
+            if self.num_cost == 1:
                 infos["cost"] = infos["cost"].unsqueeze(1)
             return self.obs_to_tensors(obs), rewards.to(self.ppo_device), dones.to(self.ppo_device), infos
         else:
             if self.value_size == 1:
                 rewards = np.expand_dims(rewards, axis=1)
+            if self.num_cost == 1:
                 infos["cost"] = np.expand_dims(infos["cost"], axis=1)
             return self.obs_to_tensors(obs), torch.from_numpy(rewards).to(self.ppo_device).float(), torch.from_numpy(dones).to(self.ppo_device), infos
 
@@ -828,7 +835,7 @@ class PPOLagBase(BaseAlgorithm):
         batch_dict['step_time'] = step_time
         return batch_dict
 
-class ContinuousPPOLagBase(PPOLagBase):
+class ContinuousP3OLagBase(PPOLagBase):
     def __init__(self, base_name, params):
         PPOLagBase.__init__(self, base_name, params)
         self.is_discrete = False
@@ -969,7 +976,7 @@ class ContinuousPPOLagBase(PPOLagBase):
             self.costv_mean_std.eval()
 
         advantages = torch.sum(advantages, axis=1)
-        cost_advantages = torch.sum(cost_advantages, axis=1)
+        # cost_advantages = torch.sum(cost_advantages, axis=1)
 
         if self.normalize_advantage:
             if self.is_rnn:
@@ -982,7 +989,8 @@ class ContinuousPPOLagBase(PPOLagBase):
                     advantages = self.advantage_mean_std(advantages)
                 else:
                     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-        cost_advantages = (cost_advantages - cost_advantages.mean()) / (cost_advantages.std() + 1e-8)
+        # t = cost_advantages.mean(axis=0)
+        cost_advantages = (cost_advantages - cost_advantages.mean(axis=0)) / (cost_advantages.std(axis=0) + 1e-8)
 
         dataset_dict = {}
         dataset_dict['old_values'] = values
@@ -1071,7 +1079,7 @@ class ContinuousPPOLagBase(PPOLagBase):
                         self.writer.add_scalar(rewards_name + '/iter'.format(i), mean_rewards[i], epoch_num)
                         self.writer.add_scalar(rewards_name + '/time'.format(i), mean_rewards[i], total_time)
 
-                    for i in range(self.value_size):
+                    for i in range(self.num_cost):
                         costs_name = 'costs' if i == 0 else 'costs{0}'.format(i)
                         self.writer.add_scalar(costs_name + '/step'.format(i), mean_costs[i], frame)
                         self.writer.add_scalar(costs_name + '/iter'.format(i), mean_costs[i], epoch_num)
@@ -1123,9 +1131,9 @@ from rl_games.algos_torch import ppg_aux
 from rl_games.common.ewma_model import EwmaModel
 from torch import optim
 
-class P3OAgent(ContinuousPPOLagBase):
+class P3OAgent(ContinuousP3OLagBase):
     def __init__(self, base_name, params):
-        ContinuousPPOLagBase.__init__(self, base_name, params)
+        ContinuousP3OLagBase.__init__(self, base_name, params)
         obs_shape = self.obs_shape
         build_config = {
             'actions_num' : self.actions_num,
@@ -1134,6 +1142,7 @@ class P3OAgent(ContinuousPPOLagBase):
             'value_size': self.env_info.get('value_size',1),
             'normalize_value' : self.normalize_value,
             'normalize_input': self.normalize_input,
+            'num_cost': self.num_cost,
         }
         
         self.model = self.network.build(build_config)
@@ -1236,7 +1245,7 @@ class P3OAgent(ContinuousPPOLagBase):
             if self.game_costs.current_size > 0:
                 mean_costs = self.game_costs.get_mean()  
             else:
-                mean_costs = [self.safety_bound]
+                mean_costs = self.safety_bound
 
 
             a_loss, a1_loss = self.actor_loss_func(old_action_log_probs_batch, action_log_probs, advantage, self.ppo, curr_e_clip, cost_advantage, self.penalty.detach())
@@ -1253,11 +1262,14 @@ class P3OAgent(ContinuousPPOLagBase):
                 b_loss = self.bound_loss(mu)
             else:
                 b_loss = torch.zeros(1, device=self.ppo_device)
-            losses, sum_mask = torch_ext.apply_masks([a_loss.unsqueeze(1), a1_loss.unsqueeze(1), c_loss, cost_loss, entropy.unsqueeze(1), b_loss.unsqueeze(1)], rnn_masks)
-            a_loss, a1_loss, c_loss, cost_loss, entropy, b_loss = losses[0], losses[1], losses[2], losses[3], losses[4], losses[5]
+            losses, sum_mask = torch_ext.apply_masks([a_loss.unsqueeze(1), c_loss, cost_loss, entropy.unsqueeze(1), b_loss.unsqueeze(1)], rnn_masks)
+            a_loss, c_loss, cost_loss, entropy, b_loss = losses[0], losses[1], losses[2], losses[3], losses[4]
 
-            a1_loss = torch.max(torch.tensor(0, ).float().to(self.ppo_device), a1_loss+(1-0.99)*(mean_costs[0]-self.safety_bound))
-            loss = a_loss + self.penalty_k*a1_loss +  0.5 * c_loss * self.critic_coef + 0.5 * cost_loss * self.critic_coef  - entropy * self.entropy_coef + b_loss * self.bounds_loss_coef
+            a1_loss = torch.mean(a1_loss, dim=0)
+            loss_a1 = 0
+            for (i, safety) in enumerate(self.safety_bound):
+                loss_a1 += torch.max(torch.tensor(0, ).float().to(self.ppo_device), a1_loss[i]+(1-0.99)*(mean_costs[i]-safety))
+            loss = a_loss + self.penalty_k*loss_a1 +  0.5 * c_loss * self.critic_coef + 0.5 * cost_loss * self.critic_coef  - entropy * self.entropy_coef + b_loss * self.bounds_loss_coef
             
             if self.multi_gpu:
                 self.optimizer.zero_grad()
@@ -1302,7 +1314,7 @@ class P3OAgent(ContinuousPPOLagBase):
             'masks' : rnn_masks
         }, curr_e_clip, 0)      
 
-        self.train_result = (a_loss, a1_loss, c_loss, cost_loss, penalty_loss, entropy, \
+        self.train_result = (a_loss, loss_a1, c_loss, cost_loss, penalty_loss, entropy, \
             kl_dist, self.last_lr, lr_mul, \
             mu.detach(), sigma.detach(), b_loss)
 

@@ -84,7 +84,7 @@ class PPOLagBuilder(NetworkBuilder):
 
             self.value = torch.nn.Linear(out_size, self.value_size)
             self.value_act = self.activations_factory.create(self.value_activation)
-            self.costv = torch.nn.Linear(out_size, self.value_size)
+            self.costv = torch.nn.Linear(out_size, kwargs["num_cost"])
             self.costv_act = self.activations_factory.create(self.value_activation)
 
             if self.is_discrete:
