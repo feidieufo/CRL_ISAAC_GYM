@@ -245,7 +245,11 @@ class VecTask(Env):
             (self.num_envs, self.num_states), device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.float)
-        self.cost_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        num_cost = self.cfg.get('num_cost', 1)
+        if num_cost == 1:
+            self.cost_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        else:
+            self.cost_buf = torch.zeros((self.num_envs,num_cost), device=self.device, dtype=torch.float)
         self.reset_buf = torch.ones(
             self.num_envs, device=self.device, dtype=torch.long)
         self.timeout_buf = torch.zeros(

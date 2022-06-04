@@ -217,7 +217,7 @@ class PPOLagBuilder(NetworkBuilder):
                     else:
                         sigma = self.sigma_act(self.sigma(a_out))
 
-                    return mu, sigma, value, states
+                    return mu, sigma, value, costv, states
             else:
                 out = obs
                 out = self.actor_cnn(out)

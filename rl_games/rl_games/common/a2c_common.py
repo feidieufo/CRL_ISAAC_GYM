@@ -93,6 +93,7 @@ class A2CBase(BaseAlgorithm):
         if self.env_info is None:
             self.vec_env = vecenv.create_vec_env(self.env_name, self.num_actors, **self.env_config)
             self.env_info = self.vec_env.get_env_info()
+        self.num_cost = self.vec_env.env.cfg.get("num_cost", 1)
 
         self.ppo_device = config.get('device', 'cuda:0')
         print('Env info:')
@@ -176,7 +177,7 @@ class A2CBase(BaseAlgorithm):
         self.games_to_track = self.config.get('games_to_track', 100)
         print(self.ppo_device)
         self.game_rewards = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
-        self.game_costs = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
+        self.game_costs = torch_ext.AverageMeter(self.num_cost, self.games_to_track).to(self.ppo_device)
         self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.ppo_device)
         self.obs = None
         self.games_num = self.config['minibatch_size'] // self.seq_len # it is used only for current rnn implementation
@@ -381,7 +382,7 @@ class A2CBase(BaseAlgorithm):
         val_shape = (self.horizon_length, batch_size, self.value_size)
         current_rewards_shape = (batch_size, self.value_size)
         self.current_rewards = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
-        self.current_costs = torch.zeros(current_rewards_shape, dtype=torch.float32, device=self.ppo_device)
+        self.current_costs = torch.zeros((batch_size, self.num_cost), dtype=torch.float32, device=self.ppo_device)
         self.current_lengths = torch.zeros(batch_size, dtype=torch.float32, device=self.ppo_device)
         self.dones = torch.ones((batch_size,), dtype=torch.uint8, device=self.ppo_device)
 
@@ -441,11 +442,13 @@ class A2CBase(BaseAlgorithm):
         if self.is_tensor_obses:
             if self.value_size == 1:
                 rewards = rewards.unsqueeze(1)
+            if self.num_cost == 1:
                 infos["cost"] = infos["cost"].unsqueeze(1)
             return self.obs_to_tensors(obs), rewards.to(self.ppo_device), dones.to(self.ppo_device), infos
         else:
             if self.value_size == 1:
                 rewards = np.expand_dims(rewards, axis=1)
+            if self.num_cost == 1:
                 infos["cost"] = np.expand_dims(infos["cost"], axis=1)
             return self.obs_to_tensors(obs), torch.from_numpy(rewards).to(self.ppo_device).float(), torch.from_numpy(dones).to(self.ppo_device), infos
 
@@ -939,8 +942,8 @@ class DiscreteA2CBase(A2CBase):
                         self.writer.add_scalar(rewards_name + '/iter'.format(i), mean_rewards[i], epoch_num)
                         self.writer.add_scalar(rewards_name + '/time'.format(i), mean_rewards[i], total_time)
 
-                    for i in range(self.value_size):
-                        costs_name = 'costs' if i == 0 else 'rewards{0}'.format(i)
+                    for i in range(self.num_cost):
+                        costs_name = 'costs' if i == 0 else 'costs{0}'.format(i)
                         self.writer.add_scalar(costs_name + '/step'.format(i), mean_costs[i], frame)
                         self.writer.add_scalar(costs_name + '/iter'.format(i), mean_costs[i], epoch_num)
                         self.writer.add_scalar(costs_name + '/time'.format(i), mean_costs[i], total_time)
@@ -1202,8 +1205,8 @@ class ContinuousA2CBase(A2CBase):
                         self.writer.add_scalar(rewards_name + '/iter'.format(i), mean_rewards[i], epoch_num)
                         self.writer.add_scalar(rewards_name + '/time'.format(i), mean_rewards[i], total_time)
 
-                    for i in range(self.value_size):
-                        costs_name = 'costs' if i == 0 else 'rewards{0}'.format(i)
+                    for i in range(self.num_cost):
+                        costs_name = 'costs' if i == 0 else 'costs{0}'.format(i)
                         self.writer.add_scalar(costs_name + '/step'.format(i), mean_costs[i], frame)
                         self.writer.add_scalar(costs_name + '/iter'.format(i), mean_costs[i], epoch_num)
                         self.writer.add_scalar(costs_name + '/time'.format(i), mean_costs[i], total_time)
