@@ -49,6 +49,7 @@ from tasks.ant_2_cost import Ant2Cost
 from tasks.humanoid_2_cost import Humanoid2Cost
 from tasks.shadow_hand_cost import ShadowHandCost
 from tasks.anymal_2_cost import Anymal2Cost
+from tasks.anymal_terrain_2_cost import AnymalTerrain2Cost
 
 # Mappings from strings to environments
 isaacgym_task_map = {
@@ -74,4 +75,5 @@ isaacgym_task_map = {
     "Humanoid2Cost": Humanoid2Cost,
     "ShadowHandCost": ShadowHandCost,
     "Anymal2Cost": Anymal2Cost,
+    "AnymalTerrain2Cost": AnymalTerrain2Cost,
 }
