@@ -75,13 +75,13 @@ you will need to escape them and put quotes around the string. For example,
 ### Demo
 |  task   | PPO  | Constraint algorithm  | note|
 |  ----  | ----  |----  |----  |
-| Ant  | ![img](docs/images/ant_ppo.png) | ![img](docs/images/ant_p3o.png) |add energy usage and joint degrees of freedom constraint|
-| Humanoid  | ![img](docs/images/humanoid_ppo.png) | ![img](docs/images/humanoid_ppolagpid.png) |add energy usage and joint degrees of freedom constraint|
+| Ant  | ![img](docs/images/ant_ppo.gif) | ![img](docs/images/ant_p3o.gif) |add energy usage and joint degrees of freedom constraint|
+| Humanoid  | ![img](docs/images/humanoid_ppo.gif) | ![img](docs/images/humanoid_ppolagpid.gif) |add energy usage and joint degrees of freedom constraint|
 ### Baselines
 - PPOLag:      Benchmarking Safe Exploration in Deep Reinforcement Learning
 - PPOLagPid:   Responsive Safety in Reinforcement Learning by PID Lagrangian Methods
 - P3O:         Penalized Proximal Policy Optimization for Safe Reinforcement Learning
-- FOCOPS:      First Order Constrained Optimization in Policy Space Yiming
+- FOCOPS:      First Order Constrained Optimization in Policy Space
 - SACLag (SACLag-Qc, SACLag-FirstQc, SACLag-Meancost)
 ### Configuration and command line arguments
 
