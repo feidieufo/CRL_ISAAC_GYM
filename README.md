@@ -72,7 +72,17 @@ Note that If there are special characters such as `[` or `=` in the checkpoint n
 you will need to escape them and put quotes around the string. For example,
 `checkpoint="./runs/Ant/nn/last_Antep\=501rew\[5981.31\].pth"`
 
-
+### Demo
+|  task   | PPO  | Constraint algorithm  | note|
+|  ----  | ----  |----  |----  |
+| Ant  | ![img](docs/images/ant_ppo.png) | ![img](docs/images/ant_p3o.png) |add energy usage and joint degrees of freedom constraint|
+| Humanoid  | ![img](docs/images/humanoid_ppo.png) | ![img](docs/images/humanoid_ppolagpid.png) |add energy usage and joint degrees of freedom constraint|
+### Baselines
+- PPOLag:      Benchmarking Safe Exploration in Deep Reinforcement Learning
+- PPOLagPid:   Responsive Safety in Reinforcement Learning by PID Lagrangian Methods
+- P3O:         Penalized Proximal Policy Optimization for Safe Reinforcement Learning
+- FOCOPS:      First Order Constrained Optimization in Policy Space Yiming
+- SACLag (SACLag-Qc, SACLag-FirstQc, SACLag-Meancost)
 ### Configuration and command line arguments
 
 We use [Hydra](https://hydra.cc/docs/intro/) to manage the config. Note that this has some 
