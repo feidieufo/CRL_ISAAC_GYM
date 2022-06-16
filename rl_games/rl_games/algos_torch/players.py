@@ -34,6 +34,7 @@ class PpoPlayerContinuous(BasePlayer):
             'value_size': self.env_info.get('value_size',1),
             'normalize_value': self.normalize_value,
             'normalize_input': self.normalize_input,
+            'num_cost': self.num_cost,
         } 
         self.model = self.network.build(config)
         self.model.to(self.device)

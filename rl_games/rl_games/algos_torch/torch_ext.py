@@ -34,6 +34,19 @@ def policy_kl(p0_mu, p0_sigma, p1_mu, p1_sigma, reduce=True):
     else:
         return kl
 
+from torch.distributions import Normal
+def gaussian_kl(mean1, std1, mean2, std2, reduce=True):
+    """
+    Calculate KL-divergence between two Gaussian distributions N(mu1, sigma1) and N(mu2, sigma2)
+    """
+    normal1 = Normal(mean1, std1)
+    normal2 = Normal(mean2, std2)
+    kl =  torch.distributions.kl.kl_divergence(normal1,normal2).sum(-1, keepdim=True)
+    if reduce:
+        return kl.mean()
+    else:
+        return kl.squeeze()
+
 def mean_mask(input, mask, sum_mask):
     return (input * rnn_masks).sum() / sum_mask
 

@@ -18,6 +18,7 @@ class BasePlayer(object):
             self.env = self.create_env()
             self.env_info = env_configurations.get_env_info(self.env)
 
+        self.num_cost = self.env.cfg.get("num_cost", 1) 
         self.value_size = self.env_info.get('value_size', 1)
         self.action_space = self.env_info['action_space']
         self.num_agents = self.env_info['agents']

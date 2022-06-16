@@ -98,6 +98,8 @@ class FOCOPSBase(BaseAlgorithm):
             self.vec_env = vecenv.create_vec_env(self.env_name, self.num_actors, **self.env_config)
             self.env_info = self.vec_env.get_env_info()
 
+        self.num_cost = self.vec_env.env.cfg.get("num_cost", 1)
+        self.env_info.update({"num_cost": self.num_cost})
         self.device = config.get('device', 'cuda:0')
         self.ppo_device = self.device
         print('Env info:')
@@ -168,6 +170,7 @@ class FOCOPSBase(BaseAlgorithm):
         print(self.device)
         self.game_rewards = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.device)
         self.game_costs = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.device)
+        self.game_costs_cur = torch_ext.AverageMeter(self.value_size, self.games_to_track).to(self.ppo_device)
         self.game_lengths = torch_ext.AverageMeter(1, self.games_to_track).to(self.device)
         self.obs = None
         self.games_num = self.config['minibatch_size'] // self.seq_len # it is used only for current rnn implementation
@@ -182,6 +185,7 @@ class FOCOPSBase(BaseAlgorithm):
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.mixed_precision)
 
         self.last_lr = self.config['learning_rate']
+        self.gammac = self.config.get('gammac', 0.99)
         self.nu_lr = self.config['nu_lr']
         self.nu_max = self.config['nu_max']
         self.eta = self.config['eta']
@@ -455,6 +459,7 @@ class FOCOPSBase(BaseAlgorithm):
         batch_size = self.num_agents * self.num_actors
         self.game_rewards.clear()
         self.game_costs.clear()
+        self.game_costs_cur.clear()
         self.game_lengths.clear()
         self.mean_rewards = self.last_mean_rewards = -100500
         self.algo_observer.after_clear_stats()
@@ -555,6 +560,7 @@ class FOCOPSBase(BaseAlgorithm):
 
         step_time = 0.0
 
+        self.game_costs_cur.clear()
         for n in range(self.horizon_length):
             if self.use_action_masks:
                 masks = self.vec_env.get_action_masks()
@@ -585,13 +591,14 @@ class FOCOPSBase(BaseAlgorithm):
             self.experience_buffer.update_data('costs', n, shaped_costs)
 
             self.current_rewards += rewards
-            self.current_costs += infos["cost"]
+            self.current_costs += (self.gammac**(self.current_lengths).unsqueeze(1))*infos["cost"]
             self.current_lengths += 1
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = self.dones.view(self.num_actors, self.num_agents).all(dim=1).nonzero(as_tuple=False)
 
             self.game_rewards.update(self.current_rewards[env_done_indices])
             self.game_costs.update(self.current_costs[env_done_indices])
+            self.game_costs_cur.update(self.current_costs[env_done_indices])
             self.game_lengths.update(self.current_lengths[env_done_indices])
             self.algo_observer.process_infos(infos, env_done_indices)
 
@@ -627,6 +634,7 @@ class FOCOPSBase(BaseAlgorithm):
         mb_rnn_states = self.mb_rnn_states
         step_time = 0.0
 
+        self.game_costs_cur.clear()
         for n in range(self.horizon_length):
             if n % self.seq_len == 0:
                 for s, mb_s in zip(self.rnn_states, mb_rnn_states):
@@ -658,7 +666,7 @@ class FOCOPSBase(BaseAlgorithm):
             self.experience_buffer.update_data('rewards', n, shaped_rewards)
 
             self.current_rewards += rewards
-            self.current_costs += infos["cost"]
+            self.current_costs += (self.gammac**(self.current_lengths).unsqueeze(1))*infos["cost"]
             self.current_lengths += 1
             all_done_indices = self.dones.nonzero(as_tuple=False)
             env_done_indices = self.dones.view(self.num_actors, self.num_agents).all(dim=1).nonzero(as_tuple=False)
@@ -668,6 +676,7 @@ class FOCOPSBase(BaseAlgorithm):
 
             self.game_rewards.update(self.current_rewards[env_done_indices])
             self.game_costs.update(self.current_costs[env_done_indices])
+            self.game_costs_cur.update(self.current_costs[env_done_indices])
             self.game_lengths.update(self.current_lengths[env_done_indices])
             self.algo_observer.process_infos(infos, env_done_indices)
 
@@ -796,7 +805,7 @@ class ContinuousFOCOPSBase(FOCOPSBase):
         update_time = update_time_end - update_time_start
         total_time = update_time_end - play_time_start
 
-        return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul
+        return batch_dict['step_time'], play_time, update_time, total_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul, mini_ep
 
     def prepare_dataset(self, batch_dict):
         obses = batch_dict['obses']
@@ -871,7 +880,7 @@ class ContinuousFOCOPSBase(FOCOPSBase):
 
         while True:
             epoch_num = self.update_epoch()
-            step_time, play_time, update_time, sum_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul = self.train_epoch()
+            step_time, play_time, update_time, sum_time, a_losses, c_losses, cost_losses, b_losses, entropies, kls, last_lr, lr_mul, mini_ep = self.train_epoch()
             total_time += sum_time
             frame = self.frame // self.num_agents
             # cleaning memory to optimize space
@@ -894,7 +903,8 @@ class ContinuousFOCOPSBase(FOCOPSBase):
                 if len(b_losses) > 0:
                     self.writer.add_scalar('losses/bounds_loss', torch_ext.mean_list(b_losses).item(), frame)
 
-                
+                self.writer.add_scalar('info/mini_ep', mini_ep, frame)
+
                 if self.game_rewards.current_size > 0:
                     mean_rewards = self.game_rewards.get_mean()
                     mean_costs = self.game_costs.get_mean()
@@ -914,6 +924,10 @@ class ContinuousFOCOPSBase(FOCOPSBase):
                         self.writer.add_scalar(costs_name + '/step'.format(i), mean_costs[i], frame)
                         self.writer.add_scalar(costs_name + '/iter'.format(i), mean_costs[i], epoch_num)
                         self.writer.add_scalar(costs_name + '/time'.format(i), mean_costs[i], total_time)
+                        costs_name = 'curcosts' if i == 0 else 'costs{0}'.format(i)
+                        self.writer.add_scalar(costs_name + '/step'.format(i), self.game_costs_cur.get_mean()[i], frame)
+                        self.writer.add_scalar(costs_name + '/iter'.format(i), self.game_costs_cur.get_mean()[i], epoch_num)
+                        self.writer.add_scalar(costs_name + '/time'.format(i), self.game_costs_cur.get_mean()[i], total_time)
 
                     self.writer.add_scalar('episode_lengths/step', mean_lengths, frame)
                     self.writer.add_scalar('episode_lengths/iter', mean_lengths, epoch_num)
@@ -962,6 +976,7 @@ class FOCOPSAgent(ContinuousFOCOPSBase):
             'value_size': self.env_info.get('value_size',1),
             'normalize_value' : self.normalize_value,
             'normalize_input': self.normalize_input,
+            'num_cost': self.num_cost,
         }
         
         self.model = self.network.build(build_config)
@@ -1034,13 +1049,13 @@ class FOCOPSAgent(ContinuousFOCOPSBase):
             sigma = res_dict['sigmas']
 
             reduce_kl = rnn_masks is None
-            kl_dist = torch_ext.policy_kl(mu, sigma, old_mu_batch, old_sigma_batch, reduce=False)
+            kl_dist = torch_ext.gaussian_kl(mu, sigma, old_mu_batch, old_sigma_batch, reduce=False)
             if rnn_masks is not None:
                 kl_dist = (kl_dist * rnn_masks).sum() / rnn_masks.numel()  #/ sum_mask   
 
             if self.game_rewards.current_size > 0:
-                mean_costs = self.game_costs.get_mean()  
-                self.nu += self.nu_lr * (mean_costs - self.safety_bound)
+                mean_costs = self.game_costs_cur.get_mean()  
+                self.nu += self.nu_lr * (mean_costs[0] - self.safety_bound)
                 if self.nu < 0:
                     self.nu = 0
                 elif self.nu > self.nu_max:
@@ -1066,7 +1081,7 @@ class FOCOPSAgent(ContinuousFOCOPSBase):
             a_loss, c_loss, cost_loss, entropy, b_loss = losses[0], losses[1], losses[2], losses[3], losses[4]
 
             loss = a_loss + 0.5 * c_loss * self.critic_coef + 0.5 * cost_loss * self.critic_coef  
-            # - entropy * self.entropy_coef 
+            - entropy * self.entropy_coef 
             + b_loss * self.bounds_loss_coef
             
             for param in self.model.parameters():
@@ -1095,7 +1110,7 @@ class FOCOPSAgent(ContinuousFOCOPSBase):
         res_dict = self.model(batch_dict)
         mu = res_dict['mus']
         sigma = res_dict['sigmas']
-        kl_end = torch_ext.policy_kl(mu, sigma, old_mu_batch, old_sigma_batch).item()
+        kl_end = torch_ext.gaussian_kl(mu, sigma, old_mu_batch, old_sigma_batch).item()
         self.train_result = (a_loss, c_loss, cost_loss, entropy, \
             kl_dist, self.last_lr, lr_mul, \
             mu.detach(), sigma.detach(), b_loss, kl_end)
